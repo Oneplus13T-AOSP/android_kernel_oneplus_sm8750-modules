@@ -642,6 +642,7 @@ static void sde_encoder_phys_cmd_te_rd_ptr_irq(void *arg, int irq_idx)
 	if (oplus_ofp_is_supported()) {
 		oplus_ofp_aod_off_hbm_on_delay_check(phys_enc);
 		oplus_ofp_pressed_icon_status_update(phys_enc, OPLUS_OFP_RD_PTR);
+		oplus_ofp_diag_irq(phys_enc, false);
 		oplus_ofp_panel_hbm_status_update(phys_enc);
 		oplus_ofp_notify_uiready(phys_enc);
 	}

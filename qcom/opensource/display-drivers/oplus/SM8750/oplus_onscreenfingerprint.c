@@ -8,6 +8,7 @@
 ***************************************************************/
 
 #include "oplus_onscreenfingerprint.h"
+#include <linux/sched.h>
 #include "oplus_display_effect.h"
 #include "oplus_display_bl.h"
 #include "oplus_display_interface.h"
@@ -25,6 +26,140 @@
 #ifdef OPLUS_FEATURE_DISPLAY_TEMP_COMPENSATION
 #include "oplus_display_temp_compensation.h"
 #endif /* OPLUS_FEATURE_DISPLAY_TEMP_COMPENSATION */
+
+
+/* Temporary observation only. Remove before release. */
+static atomic64_t ofp_touch_gen = ATOMIC64_INIT(0);
+static atomic64_t ofp_rd_count = ATOMIC64_INIT(0);
+static atomic64_t ofp_vblank_count = ATOMIC64_INIT(0);
+static atomic64_t ofp_rd_gen = ATOMIC64_INIT(-1);
+static atomic64_t ofp_vblank_gen = ATOMIC64_INIT(-1);
+
+#define OFP_G() ((u64)atomic64_read(&ofp_touch_gen))
+#define OFP_D(gen, event, fmt, ...) \
+	OFP_INFO("DIAG gen=%llu bound_gen=unknown pid=%d rd=%llu vb=%llu ev=" event " " fmt "\n", \
+		(unsigned long long)(gen), task_pid_nr(current), \
+		(unsigned long long)atomic64_read(&ofp_rd_count), \
+		(unsigned long long)atomic64_read(&ofp_vblank_count), ##__VA_ARGS__)
+
+/* Best-effort diagnostic suppression, never used by the OFP control path. */
+static bool ofp_diag_changed(struct oplus_ofp_params *p, unsigned int slot, u64 key)
+{
+	static atomic64_t null_key[16];
+	static atomic64_t null_gen[16];
+	atomic64_t *key_slot = p ? &p->diag_key[slot] : &null_key[slot];
+	atomic64_t *gen_slot = p ? &p->diag_gen[slot] : &null_gen[slot];
+	u64 old_key, old_gen, gen = OFP_G();
+
+	old_key = atomic64_xchg(key_slot, key + 1);
+	old_gen = atomic64_xchg(gen_slot, gen);
+	return old_key != key + 1 || old_gen != gen;
+}
+
+static u64 ofp_diag_state(struct oplus_ofp_params *p)
+{
+	if (!p)
+		return 0;
+	return (!!READ_ONCE(p->fp_press)) | (!!READ_ONCE(p->hbm_state) << 1) |
+		(!!READ_ONCE(p->panel_hbm_status) << 2) |
+		(!!atomic_read(&p->uiready_rearm_pending) << 3);
+}
+
+void oplus_ofp_diag_irq(void *encoder, bool video)
+{
+	atomic64_t *count = video ? &ofp_vblank_count : &ofp_rd_count;
+	atomic64_t *last_gen = video ? &ofp_vblank_gen : &ofp_rd_gen;
+	u64 gen = OFP_G();
+
+	atomic64_inc(count);
+	if ((u64)atomic64_xchg(last_gen, gen) != gen) {
+		if (video)
+			OFP_D(gen, "VBLANK", "encoder=%p first_in_gen=1", encoder);
+		else
+			OFP_D(gen, "RD_PTR", "encoder=%p first_in_gen=1", encoder);
+	}
+}
+
+/* Every attempt, including qret=0. No payload is passed to queue_work. */
+static u64 ofp_diag_queue_begin(struct oplus_ofp_params *p, unsigned int value, u64 gen)
+{
+	u64 attempt = atomic64_inc_return(&p->trace_queue_attempt);
+
+	atomic64_set(&p->trace_queue_gen_candidate, gen);
+	atomic64_set(&p->trace_queue_sample, (attempt << 2) | (value & 3));
+	return attempt;
+}
+
+/* Counter equality does not establish ownership of a callback. */
+static u64 ofp_diag_work(struct work_struct *work, struct oplus_ofp_params *selected)
+{
+	struct oplus_ofp_params *owner =
+		container_of(work, struct oplus_ofp_params, uiready_event_work);
+	u64 begin, end, sample, queued_seq, candidate_gen, wid;
+	unsigned int shared_value;
+	const char *reason;
+
+	wid = atomic64_inc_return(&owner->trace_work_count);
+	begin = atomic64_read(&owner->trace_queue_attempt);
+	sample = atomic64_read(&owner->trace_queue_sample);
+	candidate_gen = atomic64_read(&owner->trace_queue_gen_candidate);
+	shared_value = selected ? READ_ONCE(selected->notifier_chain_value) : ~0U;
+	end = atomic64_read(&owner->trace_queue_attempt);
+	queued_seq = sample >> 2;
+	if (owner != selected)
+		reason = "params_mismatch";
+	else if (!queued_seq)
+		reason = "no_sample";
+	else if (begin != end || queued_seq != end)
+		reason = "attempt_changed";
+	else
+		reason = "no_work_binding";
+	OFP_D(OFP_G(), "UIREADY_WORK",
+		"work=%llu queued_seq=%llu attempt_begin=%llu attempt_end=%llu queued_value=%u shared_value=%u candidate_gen=%llu owner=%p attrib=uncertain reason=%s",
+		(unsigned long long)wid, (unsigned long long)queued_seq,
+		(unsigned long long)begin, (unsigned long long)end,
+		(unsigned int)(sample & 3), shared_value,
+		(unsigned long long)candidate_gen, owner, reason);
+	return wid;
+}
+
+static void ofp_diag_panel_ret(struct oplus_ofp_params *p, bool on, int rc,
+		unsigned int reason, const char *skip)
+{
+	u64 key = ((u64)(u32)rc << 32) | (reason << 8) | on | (ofp_diag_state(p) << 1);
+
+	if (ofp_diag_changed(p, 2, key))
+		OFP_D(OFP_G(), "PANEL_HBM_RET", "on=%d rc=%d skip=%s", on, rc, skip);
+}
+
+static void ofp_diag_lhbm(struct oplus_ofp_params *p, int request, unsigned int reason,
+		const char *why)
+{
+	u64 key = (reason << 8) | ((request + 1) << 4) | ofp_diag_state(p);
+
+	if (ofp_diag_changed(p, 3, key)) {
+		if (reason)
+			OFP_D(OFP_G(), "LHBM_SKIP", "reason=%s state=0x%llx", why,
+				(unsigned long long)ofp_diag_state(p));
+		else
+			OFP_D(OFP_G(), "LHBM_ENTER", "request=%d state=0x%llx", request,
+				(unsigned long long)ofp_diag_state(p));
+	}
+}
+
+static void ofp_diag_arm(struct oplus_ofp_params *p, s64 delay_ms)
+{
+	u64 gen = OFP_G();
+	u64 arm = atomic64_inc_return(&p->diag_arm_attempt);
+
+	atomic64_set(&p->diag_arm_gen, gen);
+	OFP_D(gen, "RESEND_ARM",
+		"arm=%llu candidate_gen=%llu delay_ms=%lld hbm=%d panel=%d aod_unlocking=%d attrib=uncertain",
+		(unsigned long long)arm, (unsigned long long)gen, (long long)delay_ms,
+		READ_ONCE(p->hbm_state),
+			READ_ONCE(p->panel_hbm_status),
+			READ_ONCE(p->aod_unlocking));
+}
 
 /* -------------------- macro -------------------- */
 /* fp type bit setting */
@@ -269,6 +404,7 @@ int oplus_ofp_init(void *dsi_panel)
 
 		if (!oplus_ofp_oled_capacitive_is_enabled()) {
 			atomic_set(&p_oplus_ofp_params->uiready_rearm_pending, 0);
+			OFP_D(OFP_G(), "REARM_CLEAR", "reason=init touch_state=unknown");
 
 			/* add workqueue to send ui ready */
 			if (!strcmp(panel->type, "primary")) {
@@ -560,6 +696,9 @@ static int oplus_ofp_set_hbm_state(bool hbm_state)
 
 	OPLUS_OFP_TRACE_BEGIN("oplus_ofp_set_hbm_state");
 
+	if (READ_ONCE(p_oplus_ofp_params->hbm_state) != hbm_state)
+		OFP_D(OFP_G(), "HBM_STATE", "old=%d new=%d phase=before_write",
+			READ_ONCE(p_oplus_ofp_params->hbm_state), hbm_state);
 	p_oplus_ofp_params->hbm_state = hbm_state;
 	OFP_INFO("oplus_ofp_hbm_state:%d\n", hbm_state);
 	OPLUS_OFP_TRACE_INT("oplus_ofp_hbm_state", p_oplus_ofp_params->hbm_state);
@@ -674,6 +813,8 @@ int oplus_ofp_property_update(void *sde_connector, void *sde_connector_state, in
 
 	switch (prop_id) {
 	case CONNECTOR_PROP_HBM_ENABLE:
+		if (prop_val != READ_ONCE(p_oplus_ofp_params->hbm_enable))
+			OFP_D(OFP_G(), "PROP_HBM", "raw=0x%llx", (unsigned long long)prop_val);
 		if (prop_val != p_oplus_ofp_params->hbm_enable) {
 			OFP_INFO("HBM_ENABLE:%llu,dim:%llu,fingerpress:%llu,icon:%llu,aod:%llu\n", prop_val, (prop_val & OPLUS_OFP_PROPERTY_DIM_LAYER),
 				(prop_val & OPLUS_OFP_PROPERTY_FINGERPRESS_LAYER), (prop_val & OPLUS_OFP_PROPERTY_ICON_LAYER),
@@ -691,8 +832,16 @@ int oplus_ofp_property_update(void *sde_connector, void *sde_connector_state, in
 		if (oplus_ofp_local_hbm_is_enabled() && oplus_ofp_local_hbm_unlocking_acceleration_is_enabled()) {
 			if ((prop_val & OPLUS_OFP_PROPERTY_FINGERPRESS_LAYER) ||
 			    (prop_val & OPLUS_OFP_PROPERTY_DIM_LAYER)) {
+				if (READ_ONCE(p_oplus_ofp_params->fp_press) != true)
+					OFP_D(OFP_G(), "FP_PRESS",
+						"old=%d new=%d phase=before_write",
+						READ_ONCE(p_oplus_ofp_params->fp_press), true);
 				p_oplus_ofp_params->fp_press = true;
 			} else if (p_oplus_ofp_params->fp_press) {
+				if (READ_ONCE(p_oplus_ofp_params->fp_press) != false)
+					OFP_D(OFP_G(), "FP_PRESS",
+						"old=%d new=%d phase=before_write",
+						READ_ONCE(p_oplus_ofp_params->fp_press), false);
 				p_oplus_ofp_params->fp_press = false;
 				OFP_INFO("oplus_ofp_fp_press:%d (fod bits dropped)\n", p_oplus_ofp_params->fp_press);
 				OPLUS_OFP_TRACE_INT("oplus_ofp_fp_press", p_oplus_ofp_params->fp_press);
@@ -768,6 +917,9 @@ int oplus_ofp_parse_dtsi_config(void *dsi_display_mode, void *dsi_parser_utils)
 		priv_info->oplus_ofp_hbm_on_period = data;
 	}
 	OFP_DEBUG("oplus_ofp_hbm_on_period:%u\n", priv_info->oplus_ofp_hbm_on_period);
+	OFP_D(OFP_G(), "HBM_PERIOD", "mode=%p hz=%u value=%u source=%s phase=mode_parse",
+		mode, mode->timing.refresh_rate, priv_info->oplus_ofp_hbm_on_period,
+		rc ? "default" : "dtsi");
 
 	/*
 	 check how many black frames are inserted in aod off cmds flow which will affect hbm on cmds execution time,
@@ -1988,28 +2140,44 @@ static int oplus_ofp_set_panel_hbm(void *sde_connector, bool hbm_en)
 
 	OFP_DEBUG("start\n");
 
+	if (ofp_diag_changed(p_oplus_ofp_params,
+		1,
+		(ofp_diag_state(p_oplus_ofp_params) << 1) | hbm_en))
+		OFP_D(OFP_G(), "PANEL_HBM_CALL", "on=%d state=0x%llx", hbm_en,
+			(unsigned long long)ofp_diag_state(p_oplus_ofp_params));
+
 	if (oplus_ofp_oled_capacitive_is_enabled() || oplus_ofp_ultrasonic_is_enabled()) {
 		OFP_DEBUG("no need to set panel hbm\n");
+		/* skip=sensor_type */
+		ofp_diag_panel_ret(p_oplus_ofp_params, hbm_en, 0, 1, "sensor_type");
 		return 0;
 	}
 
 	if (oplus_ofp_video_mode_30hz_aod_is_enabled() && oplus_ofp_get_aod_state()) {
 		OFP_DEBUG("should not set panel hbm if panel is in video mode aod state\n");
+		/* skip=video_aod */
+		ofp_diag_panel_ret(p_oplus_ofp_params, hbm_en, 0, 2, "video_aod");
 		return 0;
 	}
 
 	if (oplus_ofp_get_hbm_state() == hbm_en) {
 		OFP_DEBUG("already in hbm state %d\n", hbm_en);
+		/* skip=same_state */
+		ofp_diag_panel_ret(p_oplus_ofp_params, hbm_en, 0, 3, "same_state");
 		return 0;
 	}
 
 	if (!c_conn || !p_oplus_ofp_params) {
 		OFP_ERR("Invalid params\n");
+		/* skip=params */
+		ofp_diag_panel_ret(p_oplus_ofp_params, hbm_en, -EINVAL, 4, "params");
 		return -EINVAL;
 	}
 
 	if (c_conn->connector_type != DRM_MODE_CONNECTOR_DSI) {
 		OFP_DEBUG("not in dsi mode, should not set panel hbm\n");
+		/* skip=not_dsi */
+		ofp_diag_panel_ret(p_oplus_ofp_params, hbm_en, 0, 5, "not_dsi");
 		return 0;
 	}
 
@@ -2017,11 +2185,15 @@ static int oplus_ofp_set_panel_hbm(void *sde_connector, bool hbm_en)
 
 	if (!display || !display->panel) {
 		OFP_ERR("Invalid display params\n");
+		/* skip=display */
+		ofp_diag_panel_ret(p_oplus_ofp_params, hbm_en, -EINVAL, 6, "display");
 		return -EINVAL;
 	}
 
 	if (!dsi_panel_initialized(display->panel)) {
 		OFP_ERR("should not set panel hbm if panel is not initialized\n");
+		/* skip=panel_uninitialized */
+		ofp_diag_panel_ret(p_oplus_ofp_params, hbm_en, -EFAULT, 7, "panel_uninitialized");
 		return -EFAULT;
 	}
 
@@ -2046,6 +2218,8 @@ static int oplus_ofp_set_panel_hbm(void *sde_connector, bool hbm_en)
 				OFP_ERR("[%s] failed to update vdc cmds, rc=%d\n", display->name, rc);
 			}
 			rc = oplus_ofp_display_cmd_set(display, DSI_CMD_LHBM_PRESSED_ICON_ON);
+			OFP_D(OFP_G(), "PANEL_HBM_CMD_RET",
+				"cmd=DSI_CMD_LHBM_PRESSED_ICON_ON rc=%d", rc);
 			if (rc) {
 				OFP_ERR("[%s] failed to send DSI_CMD_LHBM_PRESSED_ICON_ON cmds, rc=%d\n", display->name, rc);
 			}
@@ -2055,6 +2229,8 @@ static int oplus_ofp_set_panel_hbm(void *sde_connector, bool hbm_en)
 			}
 		} else {
 			rc = oplus_ofp_display_cmd_set(display, DSI_CMD_LHBM_PRESSED_ICON_OFF);
+			OFP_D(OFP_G(), "PANEL_HBM_CMD_RET",
+				"cmd=DSI_CMD_LHBM_PRESSED_ICON_OFF rc=%d", rc);
 			if (rc) {
 				OFP_ERR("[%s] failed to send DSI_CMD_LHBM_PRESSED_ICON_OFF cmds, rc=%d\n", display->name, rc);
 			}
@@ -2064,11 +2240,13 @@ static int oplus_ofp_set_panel_hbm(void *sde_connector, bool hbm_en)
 		/* send hbm cmds */
 		if (hbm_en) {
 			rc = oplus_ofp_display_cmd_set(display, DSI_CMD_HBM_ON);
+			OFP_D(OFP_G(), "PANEL_HBM_CMD_RET", "cmd=DSI_CMD_HBM_ON rc=%d", rc);
 			if (rc) {
 				OFP_ERR("[%s] failed to send DSI_CMD_HBM_ON cmds, rc=%d\n", display->name, rc);
 			}
 		} else {
 			rc = oplus_ofp_display_cmd_set(display, DSI_CMD_HBM_OFF);
+			OFP_D(OFP_G(), "PANEL_HBM_CMD_RET", "cmd=DSI_CMD_HBM_OFF rc=%d", rc);
 			if (rc) {
 				OFP_ERR("[%s] failed to send DSI_CMD_HBM_OFF cmds, rc=%d\n", display->name, rc);
 			}
@@ -2088,6 +2266,7 @@ static int oplus_ofp_set_panel_hbm(void *sde_connector, bool hbm_en)
 
 	OFP_DEBUG("end\n");
 
+	ofp_diag_panel_ret(p_oplus_ofp_params, hbm_en, rc, 0, "none");
 	return rc;
 }
 
@@ -2233,32 +2412,38 @@ int oplus_ofp_lhbm_handle(void *dsi_display)
 
 	if (!(oplus_ofp_local_hbm_is_enabled() && oplus_ofp_local_hbm_unlocking_acceleration_is_enabled())) {
 		OFP_DEBUG("no need to handle lhbm\n");
+		ofp_diag_lhbm(p_oplus_ofp_params, -1, 1, "mode");
 		return 0;
 	}
 
 	if (!display || !display->panel || !display->drm_conn || !p_oplus_ofp_params) {
 		OFP_ERR("Invalid display params\n");
+		ofp_diag_lhbm(p_oplus_ofp_params, -1, 2, "params");
 		return -EINVAL;
 	}
 
 	if (p_oplus_ofp_params->hbm_mode) {
 		OFP_DEBUG("already in hbm mode %u\n", p_oplus_ofp_params->hbm_mode);
+		ofp_diag_lhbm(p_oplus_ofp_params, -1, 3, "hbm_mode");
 		return 0;
 	}
 
 	if (!dsi_panel_initialized(display->panel)) {
 		OFP_ERR("should not handle lhbm if panel is not initialized\n");
+		ofp_diag_lhbm(p_oplus_ofp_params, -1, 4, "panel_uninitialized");
 		return -EFAULT;
 	}
 
 	c_conn = to_sde_connector(display->drm_conn);
 	if (!c_conn) {
 		OFP_ERR("Invalid c_conn params\n");
+		ofp_diag_lhbm(p_oplus_ofp_params, -1, 5, "connector");
 		return -EINVAL;
 	}
 
 	if (c_conn->connector_type != DRM_MODE_CONNECTOR_DSI) {
 		OFP_DEBUG("not in dsi mode, should not handle lhbm\n");
+		ofp_diag_lhbm(p_oplus_ofp_params, -1, 6, "not_dsi");
 		return 0;
 	}
 
@@ -2271,11 +2456,13 @@ int oplus_ofp_lhbm_handle(void *dsi_display)
 	OFP_DEBUG("bl_level=%u\n", bl_level);
 
 	if (p_oplus_ofp_params->fp_press && bl_level) {
+		ofp_diag_lhbm(p_oplus_ofp_params, true, 0, "request");
 		rc = oplus_ofp_set_panel_hbm(c_conn, true);
 		if (rc) {
 			OFP_ERR("failed to set panel hbm on\n");
 		}
 	} else if (!p_oplus_ofp_params->fp_press || !bl_level) {
+		ofp_diag_lhbm(p_oplus_ofp_params, false, 0, "request");
 		rc = oplus_ofp_set_panel_hbm(c_conn, false);
 		if (rc) {
 			OFP_ERR("failed to set panel hbm off\n");
@@ -2383,18 +2570,36 @@ int oplus_ofp_panel_hbm_status_update(void *sde_encoder_phys)
 			te_count++;
 		}
 
+		if (te_count <= display->panel->cur_mode->priv_info->oplus_ofp_hbm_on_period &&
+				ofp_diag_changed(p_oplus_ofp_params, 4, te_count))
+			OFP_D(OFP_G(), "TE_COUNT", "count=%u period=%u path=aod_te_count",
+				te_count,
+				display->panel->cur_mode->priv_info->oplus_ofp_hbm_on_period);
+
 		if (te_count == display->panel->cur_mode->priv_info->oplus_ofp_hbm_on_period) {
 			/* hbm cmds are taking effect in panel module */
+			if (READ_ONCE(p_oplus_ofp_params->panel_hbm_status) != true)
+				OFP_D(OFP_G(), "PANEL_STATE",
+					"old=%d new=%d path=aod_te_count phase=before_write",
+					READ_ONCE(p_oplus_ofp_params->panel_hbm_status), true);
 			p_oplus_ofp_params->panel_hbm_status = true;
 			OFP_INFO("oplus_ofp_panel_hbm_status:%d\n", p_oplus_ofp_params->panel_hbm_status);
 		}
 	} else {
 		if (!last_hbm_state && oplus_ofp_get_hbm_state()) {
 			/* hbm cmds are taking effect in panel module */
+			if (READ_ONCE(p_oplus_ofp_params->panel_hbm_status) != true)
+				OFP_D(OFP_G(), "PANEL_STATE",
+					"old=%d new=%d path=edge phase=before_write",
+					READ_ONCE(p_oplus_ofp_params->panel_hbm_status), true);
 			p_oplus_ofp_params->panel_hbm_status = true;
 			OFP_INFO("oplus_ofp_panel_hbm_status:%d\n", p_oplus_ofp_params->panel_hbm_status);
 		} else if (last_hbm_state && !oplus_ofp_get_hbm_state()) {
 			/* hbm cmds are not taking effect in panel module */
+			if (READ_ONCE(p_oplus_ofp_params->panel_hbm_status) != false)
+				OFP_D(OFP_G(), "PANEL_STATE",
+					"old=%d new=%d path=edge phase=before_write",
+					READ_ONCE(p_oplus_ofp_params->panel_hbm_status), false);
 			p_oplus_ofp_params->panel_hbm_status = false;
 			OFP_INFO("oplus_ofp_panel_hbm_status:%d\n", p_oplus_ofp_params->panel_hbm_status);
 			te_count = 0;
@@ -2500,42 +2705,63 @@ enum hrtimer_restart oplus_ofp_notify_uiready_timer_handler(struct hrtimer *time
 	struct sde_encoder_virt *sde_enc = NULL;
 	struct sde_encoder_phys *phys_enc = NULL;
 
+	struct oplus_ofp_params *diag_owner = container_of(timer, struct oplus_ofp_params, timer);
+	u64 diag_arm_begin, diag_arm_end, diag_candidate;
+
+
 	OFP_DEBUG("start\n");
+	if (diag_owner) {
+		diag_arm_begin = atomic64_read(&diag_owner->diag_arm_attempt);
+		diag_candidate = atomic64_read(&diag_owner->diag_arm_gen);
+		diag_arm_end = atomic64_read(&diag_owner->diag_arm_attempt);
+		OFP_D(OFP_G(), "RESEND_FIRE",
+			"arm_begin=%llu arm_end=%llu candidate_gen=%llu hbm=%d panel=%d hbm_enable=0x%llx owner=%p attrib=uncertain",
+			(unsigned long long)diag_arm_begin, (unsigned long long)diag_arm_end,
+			(unsigned long long)diag_candidate, READ_ONCE(diag_owner->hbm_state),
+			READ_ONCE(diag_owner->panel_hbm_status),
+			(unsigned long long)READ_ONCE(diag_owner->hbm_enable), diag_owner);
+	}
 
 	OPLUS_OFP_TRACE_BEGIN("oplus_ofp_notify_uiready_timer_handler");
 
 	if (oplus_ofp_local_hbm_is_enabled() && oplus_ofp_local_hbm_unlocking_acceleration_is_enabled()) {
 		if (!display) {
 			OFP_ERR("Invalid display param\n");
+			OFP_D(OFP_G(), "RESEND_SKIP", "stage=fire reason=display");
 			return HRTIMER_NORESTART;
 		}
 
 		c_conn = to_sde_connector(display->drm_conn);
 		if (!c_conn) {
 			OFP_ERR("Invalid c_conn param\n");
+			OFP_D(OFP_G(), "RESEND_SKIP", "stage=fire reason=connector");
 			return HRTIMER_NORESTART;
 		}
 
 		if (c_conn->connector_type != DRM_MODE_CONNECTOR_DSI) {
 			OFP_DEBUG("not in dsi mode, should not handle notify uiready timer\n");
+			OFP_D(OFP_G(), "RESEND_SKIP", "stage=fire reason=not_dsi");
 			return HRTIMER_NORESTART;
 		}
 
 		drm_enc = c_conn->encoder;
 		if (!drm_enc) {
 			OFP_ERR("Invalid drm_enc param\n");
+			OFP_D(OFP_G(), "RESEND_SKIP", "stage=fire reason=encoder");
 			return HRTIMER_NORESTART;
 		}
 
 		sde_enc = to_sde_encoder_virt(drm_enc);
 		if (!sde_enc) {
 			OFP_ERR("Invalid sde_enc param\n");
+			OFP_D(OFP_G(), "RESEND_SKIP", "stage=fire reason=sde_encoder");
 			return HRTIMER_NORESTART;
 		}
 
 		phys_enc = sde_enc->phys_encs[0];
 		if (!phys_enc) {
 			OFP_ERR("Invalid phys_enc param\n");
+			OFP_D(OFP_G(), "RESEND_SKIP", "stage=fire reason=phys_encoder");
 			return HRTIMER_NORESTART;
 		}
 
@@ -2543,6 +2769,9 @@ enum hrtimer_restart oplus_ofp_notify_uiready_timer_handler(struct hrtimer *time
 		oplus_ofp_notify_uiready(phys_enc);
 	}
 
+	if (!(oplus_ofp_local_hbm_is_enabled()
+			&& oplus_ofp_local_hbm_unlocking_acceleration_is_enabled()))
+		OFP_D(OFP_G(), "RESEND_SKIP", "stage=fire reason=accel_disabled");
 	OPLUS_OFP_TRACE_END("oplus_ofp_notify_uiready_timer_handler");
 
 	OFP_DEBUG("end\n");
@@ -2565,6 +2794,7 @@ static int oplus_ofp_send_uiready_event(unsigned int ui_status)
 		notify_type = DRM_PANEL_EVENT_ONSCREENFINGERPRINT_UI_DISAPPEAR;
 	}
 
+	OFP_D(OFP_G(), "UIREADY_SEND", "value=%u type=%u attrib=uncertain", ui_status, notify_type);
 	oplus_event_data_notifier_trigger(notify_type, 0, true);
 	OFP_DEBUG("oplus_event_data_notifier_trigger:%u\n", notify_type);
 
@@ -2579,6 +2809,8 @@ void oplus_ofp_uiready_event_work_handler(struct work_struct *work_item)
 {
 	struct oplus_ofp_params *p_oplus_ofp_params = oplus_ofp_get_params(oplus_ofp_display_id);
 
+	u64 diag_work_id;
+
 	OFP_DEBUG("start\n");
 
 	if (oplus_ofp_oled_capacitive_is_enabled()) {
@@ -2592,10 +2824,14 @@ void oplus_ofp_uiready_event_work_handler(struct work_struct *work_item)
 	}
 
 	OPLUS_OFP_TRACE_BEGIN("oplus_ofp_uiready_event_work_handler");
+	diag_work_id = ofp_diag_work(work_item, p_oplus_ofp_params);
 
 	/* send uiready immediately */
 	OFP_INFO("send uiready:%u\n", p_oplus_ofp_params->notifier_chain_value);
 	oplus_ofp_send_uiready_event(p_oplus_ofp_params->notifier_chain_value);
+	OFP_D(OFP_G(), "UIREADY_WORK_END", "work=%llu owner=%p attrib=uncertain",
+		(unsigned long long)diag_work_id,
+		container_of(work_item, struct oplus_ofp_params, uiready_event_work));
 	OPLUS_OFP_TRACE_INT("oplus_ofp_notifier_chain_value", p_oplus_ofp_params->notifier_chain_value);
 
 	OPLUS_OFP_TRACE_END("oplus_ofp_uiready_event_work_handler");
@@ -2615,32 +2851,47 @@ int oplus_ofp_notify_uiready(void *sde_encoder_phys)
 	struct sde_connector *c_conn = NULL;
 	struct oplus_ofp_params *p_oplus_ofp_params = oplus_ofp_get_params(oplus_ofp_display_id);
 
+	u64 diag_attempt, diag_queue_gen, diag_rearm_gen, diag_key;
+	unsigned int diag_queue_value;
+	bool diag_qret;
+
+
 	OFP_DEBUG("start\n");
 
 	if (oplus_ofp_oled_capacitive_is_enabled()) {
 		OFP_DEBUG("no need to notify uiready\n");
+		if (ofp_diag_changed(p_oplus_ofp_params, 8, 1))
+			OFP_D(OFP_G(), "UIREADY_CALC", "result=skip reason=sensor_type");
 		return 0;
 	}
 
 	if (!phys_enc || !phys_enc->connector || !p_oplus_ofp_params) {
 		OFP_ERR("Invalid phys_enc params\n");
+		if (ofp_diag_changed(p_oplus_ofp_params, 8, 2))
+			OFP_D(OFP_G(), "UIREADY_CALC", "result=skip reason=phys_params");
 		return -EINVAL;
 	}
 
 	c_conn = to_sde_connector(phys_enc->connector);
 	if (!c_conn) {
 		OFP_ERR("Invalid c_conn params\n");
+		if (ofp_diag_changed(p_oplus_ofp_params, 8, 3))
+			OFP_D(OFP_G(), "UIREADY_CALC", "result=skip reason=connector");
 		return -EINVAL;
 	}
 
 	if (c_conn->connector_type != DRM_MODE_CONNECTOR_DSI) {
 		OFP_DEBUG("not in dsi mode, should not notify uiready\n");
+		if (ofp_diag_changed(p_oplus_ofp_params, 8, 4))
+			OFP_D(OFP_G(), "UIREADY_CALC", "result=skip reason=not_dsi");
 		return 0;
 	}
 
 	if (IS_ERR_OR_NULL(p_oplus_ofp_params->uiready_event_wq)
 			|| IS_ERR_OR_NULL(&p_oplus_ofp_params->uiready_event_work)) {
 		OFP_ERR("uiready work queue or work handler is NULL");
+		if (ofp_diag_changed(p_oplus_ofp_params, 8, 5))
+			OFP_D(OFP_G(), "UIREADY_CALC", "result=skip reason=workqueue");
 		return -EFAULT;
 	}
 
@@ -2678,16 +2929,60 @@ int oplus_ofp_notify_uiready(void *sde_encoder_phys)
 		}
 	}
 
+	diag_rearm_gen = atomic64_read(&p_oplus_ofp_params->diag_rearm_gen);
 	/* Keep the request armed until the existing panel checks report READY. */
 	if (oplus_ofp_local_hbm_is_enabled()
 			&& oplus_ofp_local_hbm_unlocking_acceleration_is_enabled()
 			&& p_oplus_ofp_params->notifier_chain_value == OPLUS_OFP_UI_READY)
 		rearm_uiready = atomic_xchg(&p_oplus_ofp_params->uiready_rearm_pending, 0);
 
+	diag_key = ofp_diag_state(p_oplus_ofp_params) |
+		((u64)READ_ONCE(p_oplus_ofp_params->notifier_chain_value) << 4) |
+		((u64)last_notifier_chain_value << 8) | ((u64)rearm_uiready << 12) |
+		((u64)READ_ONCE(p_oplus_ofp_params->pressed_icon_status) << 16) |
+		((u64)!!(hbm_enable & OPLUS_OFP_PROPERTY_FINGERPRESS_LAYER) << 32) |
+		((u64)oplus_ofp_local_hbm_is_enabled() << 33) |
+		((u64)oplus_ofp_local_hbm_unlocking_acceleration_is_enabled() << 34) |
+		((u64)oplus_ofp_video_mode_aod_fod_is_enabled() << 35);
+	if (ofp_diag_changed(p_oplus_ofp_params, 7, diag_key) || rearm_uiready) {
+		OFP_D(OFP_G(), "UIREADY_CALC",
+			"value=%u last=%u panel=%d hbm=%d icon=%u fp_prop=%d lhbm=%d accel=%d video=%d rearm=%d diff=%d observed_key=0x%llx",
+			READ_ONCE(p_oplus_ofp_params->notifier_chain_value),
+				last_notifier_chain_value,
+			READ_ONCE(p_oplus_ofp_params->panel_hbm_status),
+				READ_ONCE(p_oplus_ofp_params->hbm_state),
+			READ_ONCE(p_oplus_ofp_params->pressed_icon_status),
+			!!(hbm_enable & OPLUS_OFP_PROPERTY_FINGERPRESS_LAYER),
+			oplus_ofp_local_hbm_is_enabled(),
+				oplus_ofp_local_hbm_unlocking_acceleration_is_enabled(),
+			oplus_ofp_video_mode_aod_fod_is_enabled(), rearm_uiready,
+			last_notifier_chain_value !=
+				READ_ONCE(p_oplus_ofp_params->notifier_chain_value),
+			(unsigned long long)diag_key);
+		OFP_D(OFP_G(), "REARM_USE", "consumed=%d candidate_gen=%llu attrib=uncertain",
+			rearm_uiready, (unsigned long long)diag_rearm_gen);
+	}
+	if (rearm_uiready)
+		OFP_D(OFP_G(), "REARM_CLEAR",
+			"reason=consume touch_state=unknown candidate_gen=%llu attrib=uncertain",
+			(unsigned long long)diag_rearm_gen);
+
 	if (last_notifier_chain_value != p_oplus_ofp_params->notifier_chain_value
 			|| rearm_uiready) {
 		OFP_INFO("queue uiready event work\n");
+		diag_queue_gen = OFP_G();
+		diag_queue_value = READ_ONCE(p_oplus_ofp_params->notifier_chain_value);
+		diag_attempt = ofp_diag_queue_begin(p_oplus_ofp_params,
+			diag_queue_value,
+			diag_queue_gen);
+		diag_qret =
 		queue_work(p_oplus_ofp_params->uiready_event_wq, &p_oplus_ofp_params->uiready_event_work);
+		OFP_D(diag_queue_gen, "UIREADY_QUEUE",
+			"attempt=%llu queued_value=%u qret=%d owner=%p attrib=uncertain",
+			(unsigned long long)diag_attempt,
+				diag_queue_value,
+				diag_qret,
+				p_oplus_ofp_params);
 	}
 
 	last_notifier_chain_value = p_oplus_ofp_params->notifier_chain_value;
@@ -2713,22 +3008,34 @@ int oplus_ofp_lhbm_resend_uiready(void *dsi_display)
 	struct oplus_ofp_params *p_oplus_ofp_params = oplus_ofp_get_params(oplus_ofp_display_id);
 
 	OFP_DEBUG("start\n");
+	if (ofp_diag_changed(p_oplus_ofp_params, 5, ofp_diag_state(p_oplus_ofp_params)))
+		OFP_D(OFP_G(), "RESEND_ENTER", "hbm=%d panel=%d",
+			p_oplus_ofp_params ? READ_ONCE(p_oplus_ofp_params->hbm_state) : -1,
+				p_oplus_ofp_params ?
+				READ_ONCE(p_oplus_ofp_params->panel_hbm_status) : -1);
 
 	if (!(oplus_ofp_local_hbm_is_enabled() && oplus_ofp_local_hbm_unlocking_acceleration_is_enabled())) {
 		OFP_DEBUG("no need to resend uiready\n");
+		if (ofp_diag_changed(p_oplus_ofp_params, 6, 1))
+			OFP_D(OFP_G(), "RESEND_SKIP", "stage=arm reason=accel_disabled");
 		return 0;
 	}
 
 	if (!display || !p_oplus_ofp_params) {
 		OFP_ERR("Invalid params\n");
+		if (ofp_diag_changed(p_oplus_ofp_params, 6, 2))
+			OFP_D(OFP_G(), "RESEND_SKIP", "stage=arm reason=display_or_params");
 		return -EINVAL;
 	}
 
 	if (!oplus_ofp_get_hbm_state()) {
 		OFP_DEBUG("no need to resend uiready\n");
+		if (ofp_diag_changed(p_oplus_ofp_params, 6, 3))
+			OFP_D(OFP_G(), "RESEND_SKIP", "stage=arm reason=hbm_state_false");
 		return 0;
 	}
 
+	ofp_diag_changed(p_oplus_ofp_params, 6, 0);
 	OPLUS_OFP_TRACE_BEGIN("oplus_ofp_lhbm_resend_uiready");
 
 	if (display->panel && display->panel->cur_mode) {
@@ -2744,13 +3051,18 @@ int oplus_ofp_lhbm_resend_uiready(void *dsi_display)
 
 		if (ktime_sub(ms_to_ktime(34), delta_time) > ms_to_ktime(delay_ms)) {
 			/* just in case, you need to wait until AOD is fully executed before sending uiready */
+			ofp_diag_arm(p_oplus_ofp_params,
+				ktime_to_ms(ktime_sub(ms_to_ktime(34),
+				delta_time)));
 			hrtimer_start(&p_oplus_ofp_params->timer, ktime_sub(ms_to_ktime(34), delta_time), HRTIMER_MODE_REL);
 			OFP_INFO("resend uiready after %llums\n", ktime_to_ms(ktime_sub(ms_to_ktime(34), delta_time)));
 		} else {
+			ofp_diag_arm(p_oplus_ofp_params, ktime_to_ms(ms_to_ktime(delay_ms)));
 			hrtimer_start(&p_oplus_ofp_params->timer, ms_to_ktime(delay_ms), HRTIMER_MODE_REL);
 			OFP_INFO("resend uiready after %ums\n", delay_ms);
 		}
 	} else {
+		ofp_diag_arm(p_oplus_ofp_params, ktime_to_ms(ms_to_ktime(delay_ms)));
 		hrtimer_start(&p_oplus_ofp_params->timer, ms_to_ktime(delay_ms), HRTIMER_MODE_REL);
 		OFP_INFO("resend uiready after %ums\n", delay_ms);
 	}
@@ -3932,9 +4244,28 @@ int oplus_ofp_touchpanel_event_notifier_call(struct notifier_block *nb, unsigned
 	struct dsi_display *display = get_main_display();
 	struct sde_connector *sde_conn;
 	struct drm_event event;
+	u64 diag_touch_gen = OFP_G();
+
+	if (action == EVENT_ACTION_FOR_FINGPRINT && tp_event) {
+		if (tp_event->touch_state == 1) {
+			diag_touch_gen = atomic64_inc_return(&ofp_touch_gen);
+			ofp_diag_changed(p_oplus_ofp_params, 9, 1);
+			OFP_D(diag_touch_gen, "TP_DOWN", "touch_state=1 state=0x%llx",
+				(unsigned long long)ofp_diag_state(p_oplus_ofp_params));
+		} else if (tp_event->touch_state == 0) {
+			if (ofp_diag_changed(p_oplus_ofp_params, 9, 0))
+				OFP_D(diag_touch_gen, "TP_UP", "touch_state=0 state=0x%llx",
+				(unsigned long long)ofp_diag_state(p_oplus_ofp_params));
+		} else {
+			if (ofp_diag_changed(p_oplus_ofp_params, 9, (u32)tp_event->touch_state))
+				OFP_D(diag_touch_gen, "TP_RAW",
+					"touch_state=%d", tp_event->touch_state);
+		}
+	}
 
 	if (!display || !display->panel) {
 		OPLUS_DSI_ERR("display is null\n");
+		OFP_D(diag_touch_gen, "TP_GATE_DROP", "reason=display");
 		return -EFAULT;
 	}
 
@@ -3943,20 +4274,44 @@ int oplus_ofp_touchpanel_event_notifier_call(struct notifier_block *nb, unsigned
 
 	if (!oplus_ofp_is_supported() || oplus_ofp_oled_capacitive_is_enabled()) {
 		OFP_DEBUG("no need to send aod off cmds in doze mode to speed up fingerprint unlocking\n");
+		OFP_D(diag_touch_gen, "TP_GATE_DROP", "reason=unsupported_or_capacitive");
 		return NOTIFY_OK;
 	}
 
+	if (!tp_event || action != EVENT_ACTION_FOR_FINGPRINT)
+		OFP_D(diag_touch_gen, "TP_GATE_DROP", "reason=event action=%lu", action);
 	OPLUS_OFP_TRACE_BEGIN("oplus_ofp_touchpanel_event_notifier_call");
 
 	if (tp_event) {
 		if (action == EVENT_ACTION_FOR_FINGPRINT) {
 			OFP_DEBUG("EVENT_ACTION_FOR_FINGPRINT\n");
+			if (ofp_diag_changed(p_oplus_ofp_params, 10, (u32)tp_event->touch_state))
+				OFP_D(diag_touch_gen, "TP_GATE_PASS",
+					"touch_state=%d", tp_event->touch_state);
 
 			/* Touch-up cancels a request not yet consumed by notify_uiready. */
 			if (oplus_ofp_local_hbm_is_enabled()
 					&& oplus_ofp_local_hbm_unlocking_acceleration_is_enabled())
+			{
+				if (tp_event->touch_state == 1)
+					atomic64_set(&p_oplus_ofp_params->diag_rearm_gen,
+						diag_touch_gen);
 				atomic_set(&p_oplus_ofp_params->uiready_rearm_pending,
 						tp_event->touch_state == 1);
+				if (tp_event->touch_state == 1)
+					OFP_D(diag_touch_gen, "REARM_SET",
+						"touch_state=1 candidate_gen=%llu attrib=uncertain",
+						(unsigned long long)diag_touch_gen);
+				else
+					OFP_D(diag_touch_gen, "REARM_CLEAR",
+						"touch_state=%d reason=touch_event candidate_gen=%llu attrib=uncertain",
+						tp_event->touch_state,
+						(unsigned long long)atomic64_read(
+							&p_oplus_ofp_params->diag_rearm_gen));
+			} else {
+				OFP_D(diag_touch_gen, "TP_GATE_DROP",
+					"reason=rearm_mode touch_state=%d", tp_event->touch_state);
+			}
 
 			if (tp_event->touch_state == 1) {
 				OFP_INFO("tp touchdown\n");
@@ -4690,8 +5045,14 @@ int oplus_ofp_notify_fp_press(void *buf)
 
 	if (*fp_press) {
 		/* finger is pressed down */
+		if (READ_ONCE(p_oplus_ofp_params->fp_press) != true)
+			OFP_D(OFP_G(), "FP_PRESS", "old=%d new=%d phase=before_write",
+				READ_ONCE(p_oplus_ofp_params->fp_press), true);
 		p_oplus_ofp_params->fp_press = true;
 	} else {
+		if (READ_ONCE(p_oplus_ofp_params->fp_press) != false)
+			OFP_D(OFP_G(), "FP_PRESS", "old=%d new=%d phase=before_write",
+				READ_ONCE(p_oplus_ofp_params->fp_press), false);
 		p_oplus_ofp_params->fp_press = false;
 	}
 	OFP_INFO("oplus_ofp_fp_press:%d\n", p_oplus_ofp_params->fp_press);
@@ -4739,8 +5100,14 @@ ssize_t oplus_ofp_notify_fp_press_attr(struct kobject *obj,
 
 	if (fp_press) {
 		/* finger is pressed down */
+		if (READ_ONCE(p_oplus_ofp_params->fp_press) != true)
+			OFP_D(OFP_G(), "FP_PRESS", "old=%d new=%d phase=before_write",
+				READ_ONCE(p_oplus_ofp_params->fp_press), true);
 		p_oplus_ofp_params->fp_press = true;
 	} else {
+		if (READ_ONCE(p_oplus_ofp_params->fp_press) != false)
+			OFP_D(OFP_G(), "FP_PRESS", "old=%d new=%d phase=before_write",
+				READ_ONCE(p_oplus_ofp_params->fp_press), false);
 		p_oplus_ofp_params->fp_press = false;
 	}
 	OFP_INFO("oplus_ofp_fp_press:%d\n", p_oplus_ofp_params->fp_press);

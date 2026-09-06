@@ -161,6 +161,16 @@ struct oplus_ofp_params {
 	bool fp_press;									/* indicates whether pressed icon layer is ready or not */
 	unsigned int pressed_icon_status;				/* indicates whether pressed icon has been displayed in panel module or not */
 	unsigned int notifier_chain_value;				/* ui ready notifier chain value */
+	/* Temporary diagnostic metadata, never control state. */
+	atomic64_t trace_queue_attempt;
+	atomic64_t trace_queue_sample;
+	atomic64_t trace_queue_gen_candidate;
+	atomic64_t trace_work_count;
+	atomic64_t diag_rearm_gen;
+	atomic64_t diag_arm_attempt;
+	atomic64_t diag_arm_gen;
+	atomic64_t diag_key[16];
+	atomic64_t diag_gen[16];
 	atomic_t uiready_rearm_pending; /* resend READY once for a new touch */
 	struct workqueue_struct *uiready_event_wq;		/* a workqueue used to send uiready event */
 	struct work_struct uiready_event_work;			/* a work struct used to send uiready event */
@@ -261,6 +271,7 @@ bool oplus_ofp_get_hbm_state(void);
 int oplus_ofp_property_update(void *sde_connector, void *sde_connector_state, int prop_id, uint64_t prop_val);
 
 /* -------------------- fod -------------------- */
+void oplus_ofp_diag_irq(void *encoder, bool video);
 int oplus_ofp_parse_dtsi_config(void *dsi_display_mode, void *dsi_parser_utils);
 int oplus_ofp_lhbm_pressed_icon_gamma_update(void *dsi_display);
 int oplus_ofp_lhbm_backlight_update(void *sde_encoder_virt, void *dsi_panel, unsigned int *bl_level);

@@ -1371,6 +1371,7 @@ not_flushed:
 	wake_up_all(&phys_enc->pending_kickoff_wq);
 #ifdef OPLUS_FEATURE_DISPLAY_ONSCREENFINGERPRINT
 	if (oplus_ofp_is_supported()) {
+		oplus_ofp_diag_irq(phys_enc, true);
 		oplus_ofp_panel_hbm_status_update(phys_enc);
 		oplus_ofp_notify_uiready(phys_enc);
 	}
