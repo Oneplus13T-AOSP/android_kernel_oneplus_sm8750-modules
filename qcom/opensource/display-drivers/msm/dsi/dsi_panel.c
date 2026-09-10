@@ -4655,6 +4655,10 @@ struct dsi_panel *dsi_panel_get(struct device *parent,
 
 	return panel;
 error:
+#ifdef OPLUS_FEATURE_DISPLAY_ONSCREENFINGERPRINT
+	/* Construction only: never activated, hence no published OFP work. */
+	oplus_ofp_cleanup_partial(panel);
+#endif
 	kfree(new_panel_name);
 	kfree(panel);
 	return ERR_PTR(rc);
@@ -4662,6 +4666,10 @@ error:
 
 void dsi_panel_put(struct dsi_panel *panel)
 {
+#ifdef OPLUS_FEATURE_DISPLAY_ONSCREENFINGERPRINT
+	/* Active stop or never-active partial cleanup has already completed. */
+	oplus_ofp_deinit_final(panel);
+#endif
 	drm_panel_remove(&panel->drm_panel);
 
 	/* free resources allocated for ESD check */
