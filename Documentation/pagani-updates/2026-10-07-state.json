@@ -1,0 +1,276 @@
+{
+  "date": "2026-10-07",
+  "target": "android_kernel_oneplus_sm8750-modules_los",
+  "branch": "lineage-24.0",
+  "custom_base": "c7ea8eff1b2d76484f7fbbb7bac755c75c31f5aa",
+  "source_revision": "6a196f79f77acd55cf302e1696c038e4cad99254",
+  "source_release": "PKX110_16.0.10.500(CN01)",
+  "source_branch": "oneplus/sm8750_b_16.0.0_oneplus_13t",
+  "oem_comparison_base": "0e05a83de20eb31776e6311fbef0b0a5013a46e5",
+  "comparison_base_note": "Delta discovery only; custom originally contains mixed CPH2723, Ace6 and CLO imports. Not a prior complete 13T sync.",
+  "commits": [
+    "39c04b12eb0396950b2ad79ad90f935b498314c0 power: oplus: v2: Update drivers from PKX110_16.0.10.500(CN01)",
+    "223985f21a3153c963b02589caf404ad65a1ea9d camera: Import OnePlus 13T request and buffer tracking fixes",
+    "05d8c7d5e2d53706b4fdee643fd5cfcd4ee5f32b wlan: Import OnePlus 13T connection cleanup fixes",
+    "92db4839eda643c13c12b9151472c35b2485cb3c haptics: Bound and terminate vibration style input",
+    "4658af2232e8029300dc24e723f748d23f467df7 display: Import OnePlus 13T power guards and AOD backlight notification",
+    "752bffed304fca925ee7c5aa5b67a85c5bc2a119 display-drivers: oplus_onscreenfingerprint: Notify fp press on fingerprint events",
+    "de0ad859081e99124ee8cd7c8f90889ee39088dc display-drivers: oplus_onscreenfingerprint: Rearm UI ready notification on LHBM touch down",
+    "e6564c5455a581a408e17b96de9e7c23a3ed54f3 drm/msm: oplus: serialize UDFPS UI ready request lifecycle",
+    "19a1d50b3cf1e10a849a82fd15d480ab252846f6 drm/msm: oplus: reevaluate UDFPS UI ready on touch down"
+  ],
+  "scope": [
+    "charger/v2: coherent OEM delta with downstream exceptions",
+    "camera: context/JPEG/SMMU safety hunks",
+    "wlan: three cleanup/connection paths",
+    "haptic: proc input validation only",
+    "display: APUIR power guards and AOD backlight notification only",
+    "user-authored UDFPS series: Gerrit 504073..504076 patchset 1"
+  ],
+  "not_applied": [
+    "userspace Gerrit 504077 and 504078 (repositories absent)",
+    "legacy charger/v1 and pd_ext",
+    "charger DDK/Bazel integration",
+    "wholesale Qualcomm/CLO driver replacement",
+    "Ace6/Nord6 LHBM policy f818fcc726",
+    "new optional chip enablement",
+    "OEM MM/storage/scheduler features needing kernel hooks",
+    "remaining touch/audio/sensor/diagnostic OEM deltas not established as a missing Pagani hardware dependency"
+  ],
+  "validation": {
+    "charger_object": "pass",
+    "haptic_object": "pass",
+    "camera_three_objects": "pass",
+    "wlan_three_objects_peach_v2": "pass",
+    "display": [
+      {
+        "flag": "undefined",
+        "returncode": 0,
+        "command": [
+          "make",
+          "-C",
+          "/home/ccc/바탕화면/codex/pagani/android_kernel_oneplus_sm8750",
+          "O=/tmp/pagani-module-build",
+          "ARCH=arm64",
+          "LLVM=-18",
+          "KCFLAGS=-mcpu=generic -Wno-error=address-of-packed-member -Wno-error=unused-but-set-variable",
+          "M=../sm8750-modules/qcom/opensource/display-drivers/msm",
+          "DISPLAY_ROOT=/home/ccc/바탕화면/codex/pagani/android_kernel_oneplus_sm8750-modules_los/qcom/opensource/display-drivers",
+          "KERNEL_SRC=/home/ccc/바탕화면/codex/pagani/android_kernel_oneplus_sm8750",
+          "KERNEL_ROOT=/home/ccc/바탕화면/codex/pagani/android_kernel_oneplus_sm8750",
+          "-j8",
+          "../oplus/SM8750/oplus_apuirdim.o",
+          "../oplus/SM8750/oplus_onscreenfingerprint.o",
+          "dsi/dsi_panel.o",
+          "dsi/dsi_display.o"
+        ]
+      },
+      {
+        "flag": "0",
+        "returncode": 0,
+        "command": [
+          "make",
+          "-C",
+          "/home/ccc/바탕화면/codex/pagani/android_kernel_oneplus_sm8750",
+          "O=/tmp/pagani-module-build",
+          "ARCH=arm64",
+          "LLVM=-18",
+          "KCFLAGS=-mcpu=generic -Wno-error=address-of-packed-member -Wno-error=unused-but-set-variable -DOPLUS_OFP_UIREADY_COMPAT=0",
+          "M=../sm8750-modules/qcom/opensource/display-drivers/msm",
+          "DISPLAY_ROOT=/home/ccc/바탕화면/codex/pagani/android_kernel_oneplus_sm8750-modules_los/qcom/opensource/display-drivers",
+          "KERNEL_SRC=/home/ccc/바탕화면/codex/pagani/android_kernel_oneplus_sm8750",
+          "KERNEL_ROOT=/home/ccc/바탕화면/codex/pagani/android_kernel_oneplus_sm8750",
+          "-j8",
+          "../oplus/SM8750/oplus_apuirdim.o",
+          "../oplus/SM8750/oplus_onscreenfingerprint.o",
+          "dsi/dsi_panel.o",
+          "dsi/dsi_display.o"
+        ]
+      },
+      {
+        "flag": "1",
+        "returncode": 0,
+        "command": [
+          "make",
+          "-C",
+          "/home/ccc/바탕화면/codex/pagani/android_kernel_oneplus_sm8750",
+          "O=/tmp/pagani-module-build",
+          "ARCH=arm64",
+          "LLVM=-18",
+          "KCFLAGS=-mcpu=generic -Wno-error=address-of-packed-member -Wno-error=unused-but-set-variable -DOPLUS_OFP_UIREADY_COMPAT=1",
+          "M=../sm8750-modules/qcom/opensource/display-drivers/msm",
+          "DISPLAY_ROOT=/home/ccc/바탕화면/codex/pagani/android_kernel_oneplus_sm8750-modules_los/qcom/opensource/display-drivers",
+          "KERNEL_SRC=/home/ccc/바탕화면/codex/pagani/android_kernel_oneplus_sm8750",
+          "KERNEL_ROOT=/home/ccc/바탕화면/codex/pagani/android_kernel_oneplus_sm8750",
+          "-j8",
+          "../oplus/SM8750/oplus_apuirdim.o",
+          "../oplus/SM8750/oplus_onscreenfingerprint.o",
+          "dsi/dsi_panel.o",
+          "dsi/dsi_display.o"
+        ]
+      }
+    ],
+    "dt_compile_count": 12,
+    "dt_combination_count": 4,
+    "dt_properties": [
+      {
+        "file": "sun-24821-combined.dtb",
+        "adspslpi_mem": {
+          "path": "/reserved-memory/adspslpi_region@9ee00000",
+          "reg": "0 9ee00000 0 5080000"
+        },
+        "wlan_peach": {
+          "path": "/soc/qcom,cnss-peach@b0000000",
+          "nvmem-cells": "0",
+          "nvmem-cell-names": "",
+          "wcal-pbs-supply": "0",
+          "status": null
+        },
+        "panels": [
+          {
+            "symbol": "dsi_panel_AA594_P_7_A0020_dsc_cmd",
+            "fp_type": "490",
+            "mode": "dsi_cmd_mode"
+          },
+          {
+            "symbol": "dsi_panel_AA594_P_7_A0020_dsc_cmd_evt",
+            "fp_type": "490",
+            "mode": "dsi_cmd_mode"
+          }
+        ]
+      },
+      {
+        "file": "sun-24875-combined.dtb",
+        "adspslpi_mem": {
+          "path": "/reserved-memory/adspslpi_region@9ee00000",
+          "reg": "0 9ee00000 0 5080000"
+        },
+        "wlan_peach": {
+          "path": "/soc/qcom,cnss-peach@b0000000",
+          "nvmem-cells": "0",
+          "nvmem-cell-names": "",
+          "wcal-pbs-supply": "0",
+          "status": null
+        },
+        "panels": [
+          {
+            "symbol": "dsi_panel_AA594_P_7_A0020_dsc_cmd",
+            "fp_type": "490",
+            "mode": "dsi_cmd_mode"
+          },
+          {
+            "symbol": "dsi_panel_AA594_P_7_A0020_dsc_cmd_evt",
+            "fp_type": "490",
+            "mode": "dsi_cmd_mode"
+          }
+        ]
+      },
+      {
+        "file": "sun-v2-24821-combined.dtb",
+        "adspslpi_mem": {
+          "path": "/reserved-memory/adspslpi_region@9ee00000",
+          "reg": "0 9ee00000 0 5080000"
+        },
+        "wlan_peach": {
+          "path": "/soc/qcom,cnss-peach@b0000000",
+          "nvmem-cells": "0",
+          "nvmem-cell-names": "",
+          "wcal-pbs-supply": "0",
+          "status": null
+        },
+        "panels": [
+          {
+            "symbol": "dsi_panel_AA594_P_7_A0020_dsc_cmd",
+            "fp_type": "490",
+            "mode": "dsi_cmd_mode"
+          },
+          {
+            "symbol": "dsi_panel_AA594_P_7_A0020_dsc_cmd_evt",
+            "fp_type": "490",
+            "mode": "dsi_cmd_mode"
+          }
+        ]
+      },
+      {
+        "file": "sun-v2-24875-combined.dtb",
+        "adspslpi_mem": {
+          "path": "/reserved-memory/adspslpi_region@9ee00000",
+          "reg": "0 9ee00000 0 5080000"
+        },
+        "wlan_peach": {
+          "path": "/soc/qcom,cnss-peach@b0000000",
+          "nvmem-cells": "0",
+          "nvmem-cell-names": "",
+          "wcal-pbs-supply": "0",
+          "status": null
+        },
+        "panels": [
+          {
+            "symbol": "dsi_panel_AA594_P_7_A0020_dsc_cmd",
+            "fp_type": "490",
+            "mode": "dsi_cmd_mode"
+          },
+          {
+            "symbol": "dsi_panel_AA594_P_7_A0020_dsc_cmd_evt",
+            "fp_type": "490",
+            "mode": "dsi_cmd_mode"
+          }
+        ]
+      }
+    ],
+    "diff_check": "pass",
+    "full_rom_link_packaging": "not run",
+    "hardware": "not run",
+    "toolchain": "host clang/LLVM 18; -mcpu=generic; -Wno-error=address-of-packed-member; -Wno-error=unused-but-set-variable"
+  },
+  "gerrit": [
+    {
+      "change": 504073,
+      "project": "LineageOS/android_kernel_oneplus_sm8750-modules",
+      "revision": "2f519ed4a11ea9b888c81bc5f633933782b4e256",
+      "patchset": 1,
+      "applied": true,
+      "change_id": "I729836028f201db4b7d5ea67c1b9375f466c627d"
+    },
+    {
+      "change": 504074,
+      "project": "LineageOS/android_kernel_oneplus_sm8750-modules",
+      "revision": "bae3c488af35a7579e564874346d8f97f78d5409",
+      "patchset": 1,
+      "applied": true,
+      "change_id": "I467d0aa4054e10ee9b00cf0e6e41dc887101af49"
+    },
+    {
+      "change": 504075,
+      "project": "LineageOS/android_kernel_oneplus_sm8750-modules",
+      "revision": "6fe684068767df0842859ad193bc1cf632745109",
+      "patchset": 1,
+      "applied": true,
+      "change_id": "I9f00ceb406d799d890a546be9f9860febfeb1199"
+    },
+    {
+      "change": 504076,
+      "project": "LineageOS/android_kernel_oneplus_sm8750-modules",
+      "revision": "7f3781d633c098427009453d1cc8fb65dc5b6342",
+      "patchset": 1,
+      "applied": true,
+      "change_id": "I3c3701dd5f77aca09ded46ac59598e0088c43017"
+    },
+    {
+      "change": 504077,
+      "project": "LineageOS/android_hardware_qcom_display",
+      "revision": "102417c23b0d8e61a40518e9e955d27405dc8bea",
+      "patchset": 1,
+      "applied": false,
+      "change_id": "I7d92010c8dac94381d39cbf8c53b65377a5e2aa7"
+    },
+    {
+      "change": 504078,
+      "project": "LineageOS/android_vendor_qcom_opensource_display-core",
+      "revision": "aa87808dd5e70223a53e1f8635d1b119d43a7a4d",
+      "patchset": 1,
+      "applied": false,
+      "change_id": "Id4339f129afb076f57eef322720e07df025d277f"
+    }
+  ]
+}

@@ -1,0 +1,241 @@
+OnePlus 13T(Pagani) 모듈 업데이트 및 디바이스 구성 검토
+작성일: 2026-10-07
+
+1. 결론과 범위
+
+수정 대상은 android_kernel_oneplus_sm8750-modules_los이다.
+PKX110_16.0.10.500(CN01) 공개 소스에서 충전 v2 변경과 카메라·WLAN·진동·디스플레이의
+선별 수정이 필요하다고 판단해 OEM 업데이트 5개 커밋으로 반영했다.
+추가로 사용자가 제공한 지문 호환 모듈 Gerrit 4건을 별도 커밋으로 적용했다.
+소스 변경은 총 165파일이다. 변경 경로는 2026-10-07-files.tsv를 참고한다.
+
+이 작업은 OEM 전체 모듈의 완전 동기화가 아니다. 특히 새로운 CLO 코드가 들어 있는
+Qualcomm 공통 드라이버를 OEM 구버전으로 덮어쓰지 않았다. "파일이 OEM에만 있다"는
+것만으로 Pagani에 필요한 모듈이라고 판단하지 않았다.
+
+기존 android_kernel_oneplus_sm8750-modules에 먼저 적용했던 이번 작업의 미커밋 변경
+114개와 신규 파일 38개는 동일 HEAD의 _los 저장소로 바이트 검증 후 옮겼다.
+기존 저장소는 c7ea8eff1b의 깨끗한 상태로 복구했다. 커널 본체와 두 Android device
+저장소, 참고 Ace6/OEM 저장소는 수정하지 않았다. 원격 push는 하지 않았다.
+
+2. 고정 기준
+
+대상 시작: c7ea8eff1b2d76484f7fbbb7bac755c75c31f5aa (lineage-24.0)
+OEM: 6a196f79f77acd55cf302e1696c038e4cad99254
+OEM 제품/릴리스: OnePlus 13T / PKX110_16.0.10.500(CN01)
+OEM 브랜치: oneplus/sm8750_b_16.0.0_oneplus_13t
+OEM 변경 탐색 기준: 0e05a83de20eb31776e6311fbef0b0a5013a46e5 (.16.0.0.212)
+Ace6 참고: 72b4992d9b76a2900d2bcf1dce39d7dd3bd917f2
+커널: 492d43e2ccac9bd868cce20cff276f9b376996f9
+device/pagani: 90758978df93e22676a132b5fd3aa38ace0e9ef1
+device/sm8750-common: 75e841b08e3cbee9cf1bf619a3ba4a2fd3e52908
+커널 DT: android_kernel_oneplus_sm8750-devicetrees_los, 앞선 .500 업데이트 결과 사용
+
+OEM 변경 탐색 기준은 "현재 custom이 이 OEM을 완전히 반영했다"는 뜻이 아니다.
+원래 custom에는 CPH2723, Ace6 HBP, 최신 CLO 및 Lineage 수정이 혼합되어 있다.
+원본 FIRST→NEW, 현재 custom, Ace6 참고를 대조하고 경로/변경 블록별로 선택했다.
+네트워크로 OEM 최신 브랜치를 갱신하지 않았으므로 위 SHA가 이번 소스 기준이다.
+
+3. OEM 커밋
+
+39c04b12eb  charger/v2: 152파일, 신규 38파일
+  ADSP 충전 인터페이스, BQ27541/SC8547D 관련 경로, 공통 MMS/IC 정의,
+  battery-smooth/PPS/UFCS 전략 및 공통 상태 처리를 함께 갱신했다.
+  새 boost/reverse-charge 및 전략 의존 파일을 포함하여 Makefile이 가리키는
+  소스가 빠지지 않도록 했다. 선택적 칩/기능의 추가 Kconfig는 활성화하지 않았다.
+  추가된 소스들은 대부분 oplus_chg_v2.ko에 포함될 구성요소이며 독립 .ko가 아니다.
+  CHARGE_FULL의 batt_fcc 보고와 MMI 무선충전 상태 제어를 보존했다.
+  charger/v1, pd_ext 및 사용하지 않는 DDK/Bazel 등록은 가져오지 않았다.
+  새 파일은 0644, 기존 모드는 유지했다. 가져온 변경 줄의 공백/LF만 정리했다.
+
+223985f21a  camera: 3파일
+  사용 중 남은 packet 감지, JPEG start/READY 상태 처리, SMMU tracker 리스트의
+  제거/반환 직렬화를 반영했다. 기존 CLO flush/할당 변경은 유지했다.
+  OEM은 free-list 반환을 OPLUS_FEATURE_CAMERA_COMMON 조건 안에 넣는다.
+  그 상태로 가져오면 해당 매크로가 꺼진 빌드에서 반환이 사라지므로, 이 트리는
+  기존 NULL/refcount 검사와 리스트 반환/잠금을 조건 없이 유지하도록 조정했다.
+  Ace6 d1ba4c66ea의 수정 단위를 참고하고 13T 원본에 해당 변경이 있는지 대조했다.
+
+05d8c7d5e2  WLAN: 3파일
+  DBR의 비어 있는 DMA 주소 unmap 방지와 target 상태 확인, Wi-Fi positioning
+  버퍼를 NULL로 만들기 전 해제, 강제 BSS peer 삭제 준비 실패 경로를 보완했다.
+  참고: Ace6 204564592e. 실제 검증 프로필은 sun_gki_peach-v2이다.
+
+92db4839ed  haptics: 1파일
+  proc vibration_style 입력이 배열 크기와 같을 때 거부하고 NUL 종료를 보장한다.
+  숫자 파싱 오류를 성공한 쓰기로 보고하지 않는다. OEM의 게임 파형 확장은 제외했다.
+
+4658af2232  display: 2파일
+  APUIR 명령 전원 상태를 확인하고 panel_lock 획득 후 다시 확인한다.
+  AOD 종료 시 복원된 백라이트 값을 notifier로 전달한다.
+  기존 패널 레지스터 배열과 지문 HBM/UI-ready 판단 조건은 이 커밋에서 변경하지 않았다.
+
+4. 지문 수정은 OEM 업데이트로 대체되지 않는다
+
+사용자가 제공한 다음 세 층은 한 구성이다.
+
+  device/pagani의 aa5589a:
+    qtidisplay.oplus_udfps_input_press = true
+        → Gerrit 504077의 Soong 옵션 정의
+        → Gerrit 504078의 입력 LayerStack press 보존
+        → DRM FINGERPRESS/DIM 속성
+
+  device/pagani의 9075897:
+    KCFLAGS+=-DOPLUS_OFP_UIREADY_COMPAT=1
+        → Gerrit 504073의 제품/패널 조건 및 property→fp_press 처리
+        → 504074의 새 터치 READY 재알림 요청
+        → 504075의 요청 소유권·취소·workqueue·패널 종료 처리
+        → 504076의 TP_DOWN 즉시 READY 재평가
+
+검토 시 여섯 Gerrit 변경 모두 patchset 1, NEW 상태였다. 승인/병합된 upstream
+변경으로 표현하지 않는다. 각 SHA와 Change-Id는 state.json에 고정했다.
+
+커널 4건은 이번 대상에 없었으므로 작성자·커밋 메시지·Change-Id를 보존해 적용했다.
+  504073 → 752bffed30
+  504074 → de0ad85908
+  504075 → e6564c5455
+  504076 → 19a1d50b3c
+OEM의 AOD 백라이트 알림 추가와 충돌하지 않았고 별도 기능으로 함께 유지했다.
+
+13T 공개 .500에는 이 요청 소유권/재알림 처리와 사용자 공간 press 보존이 없다.
+따라서 OEM 동기화가 됐다는 이유로 디바이스 두 커밋이나 지문 커널 4건을 빼면 안 된다.
+Ace6 f818fcc726은 Nord6에서 유래한 물리 터치/LHBM 정책도 포함하며, 위 구성과
+동등하지 않다. 이번에는 가져오지 않았다.
+
+Pagani AA594 EVT/일반 패널은 command mode, fp_type=0x490이다.
+0x490에는 LOCAL_HBM(bit4), ULTRA_LOW_POWER_AOD(bit7),
+LOCAL_HBM_UNLOCKING_ACCELERATION(bit10)이 있다. 지문 호환 패치의 required bits를
+만족하고 제외되는 초음파/정전식/video-AOD bits는 없다. primary 선택은 런타임 조건이다.
+기존 synaptics_hbp 드라이버에는 EVENT_ACTION_FOR_FINGPRINT 발생 경로도 있다.
+
+사용자 공간 저장소 android_hardware_qcom_display와
+android_vendor_qcom_opensource_display-core는 제공된 로컬 작업 범위에 없으므로
+504077/504078은 검토·다운로드만 했고 적용하지 않았다. ROM 소스에 두 변경을
+함께 적용해야 입력 press 보존이 완성된다. device.mk의 옵션만으로 구현이 생기지 않는다.
+
+참조:
+https://review.lineageos.org/c/LineageOS/android_kernel_oneplus_sm8750-modules/+/504073
+https://review.lineageos.org/c/LineageOS/android_kernel_oneplus_sm8750-modules/+/504074
+https://review.lineageos.org/c/LineageOS/android_kernel_oneplus_sm8750-modules/+/504075
+https://review.lineageos.org/c/LineageOS/android_kernel_oneplus_sm8750-modules/+/504076
+https://review.lineageos.org/c/LineageOS/android_hardware_qcom_display/+/504077
+https://review.lineageos.org/c/LineageOS/android_vendor_qcom_opensource_display-core/+/504078
+
+5. Dodge에서 만든 Android device 구성 검토
+
+BoardConfigCommon.mk의 커널 설정은 gki_defconfig + vendor/sun_perf.config +
+vendor/oplus/sun_perf.config이며, Pagani에서 CONFIG_PAGANI_DTB=y를 추가한다.
+드라이버 소스 존재 여부뿐 아니라 Kconfig/Makefile, DT compatible, external 모듈
+등록과 modules.load/recovery 항목을 연결해 검토했다.
+
+검토한 주요 경로와 결과:
+  충전: CONFIG_OPLUS_CHG_V2/ADSP, SC8547D, BQ27541 경로와 oplus_chg_v2.ko,
+        ufcs_class.ko 로딩 항목 존재. inline 커널 symlink를 통해 빌드된다.
+  터치: 활성 synaptics,tcm-spi-hbp + oplus_bsp_synaptics_tcm2.ko 등록 존재.
+        새 HBP의 S3910/공통 모듈도 등록되어 있다. 이름 변경을 반영해 확인했다.
+  지문: oplus,fp_spi + oplus_bsp_uff_fp_driver.ko 존재. UI-ready는 새 센서 모듈이
+        아니라 기존 msm_drm.ko의 디스플레이 동작이다.
+  화면: msm_drm.ko 및 display external 빌드 등록 존재.
+  WLAN: qca_cld3_peach_v2.ko 존재. 예전 일반 wlan.ko 이름을 새로 추가하지 않았다.
+  카메라: camera.ko/camera_extension.ko 및 관련 전원 드라이버 등록 존재.
+  오디오: Pagani TFA98xx I2C/codec과 oplus_audio_tfa98xx_v6.ko 등록 존재.
+  진동: oplus_haptic.ko, haptic_feedback.ko 및 inline 빌드 경로 존재.
+  NFC: qcom,sn-nci에 대응하는 nxp-nci.ko 및 external 빌드 등록 존재.
+
+위 핵심 하드웨어 범위에서는 추가할 독립 .ko/로딩 등록 누락을 확인하지 못했다.
+그래서 Android device 트리에 추측성 모듈을 추가하지 않았다. 이 결과는 모든 OEM
+기능이나 모든 보드에 대한 완전성 증명이 아니다. 실제 install 산출물 확인도 남아 있다.
+공통 modules.load에는 중복 항목이 있으나 이번 기능 업데이트와 무관해 정리하지 않았다.
+
+6. 미반영/보류와 이유
+
+- 새 OEM chip 파일이나 Ace6 전용 코드를 발견해도 Pagani가 쓰지 않으면 활성화하지 않았다.
+- OEM mm_osvelte 등 메모리/스케줄링/스토리지 확장은 커널 hook과 함께 검토해야 한다.
+  DT에 관련 설정 노드가 있다는 사실만으로 해당 모듈만 복사해 넣지 않았다.
+- Qualcomm 일반 GPU/audio/camera/display/WLAN 전체를 교체하면 최신 CLO를 되돌릴 수 있다.
+- OEM의 나머지 audio/touch/sensor/진단 변경은 자동 반영하지 않았다. 일부는 타 칩 지원,
+  timing/debug 정책, OEM 서비스와 결합되어 있고 필수 Pagani 누락으로 확인되지 않았다.
+  특히 기존 Ace6 HBP 업데이트와 gesture keycode, audio proc 버스 구분을 보존했다.
+- TFA OEM 전체 파일 교체로 현재 공유 트리의 다른 칩 지원이 삭제되지 않게 했다.
+- 다음 업데이트 때 보류 범위를 새 OEM 간 diff만 보고 생략하지 말고 다시 점검해야 한다.
+
+7. 수행한 검증과 한계
+
+통과:
+  git diff --check (시작 SHA 기준 전체 변경 및 각 커밋 staged diff)
+  기존 저장소/커널/device 저장소가 원래 HEAD의 clean 상태임을 확인
+  charger v2 로컬 예외 대조, touch/HBP/지문 센서 소스의 불필요한 변경 없음 확인
+  oplus_chg_v2.o 복합 객체 컴파일/링크
+  oplus_haptic.o 복합 객체 컴파일/링크
+  변경된 카메라 3객체 및 peach-v2 WLAN 3객체 컴파일
+  OFP/APUIR/dsi_panel/dsi_display 객체: 지문 옵션 미정의, 0, 1 각각 컴파일
+  최종 OFP .cmd에 -DOPLUS_OFP_UIREADY_COMPAT=1 전달 확인
+  cpp+dtc로 base/공통 overlay/Pagani overlay 총 12소스 컴파일
+  fdtoverlay로 sun·sun-v2 × 24821·24875 총 4조합 적용
+  조합된 DT에서 ADSP reg=0 9ee00000 0 5080000,
+    WLAN nvmem-cells=0, nvmem-cell-names="", wcal-pbs-supply=0,
+    AA594 EVT/일반 패널 fp_type=490 및 dsi_cmd_mode 확인
+
+빌드 환경:
+  제공된 커널 소스와 실제 세 config fragment를 사용했다.
+  호스트 clang/LLVM 18은 기존 커널의 -mcpu=oryon-1을 지원하지 않아 검증 명령에
+  -mcpu=generic을 추가했다. 커널 원본 Makefile은 바꾸지 않았다.
+  -Wno-error=address-of-packed-member 및 -Wno-error=unused-but-set-variable을
+  검증 명령에만 지정했다. 경고 자체는 로그에 남겼다. 소스의 경고 정책을 낮추지 않았다.
+  LLVM=1의 unsuffixed 도구 누락은 LLVM=-18로 해결했다.
+  WLAN의 최초 default 프로필 시도는 헤더/설정 불일치로 실패했으며 실제 wrapper의
+  sun_gki_peach-v2 옵션을 적용한 뒤 통과했다.
+  DT 최초 조합은 sun-audio/sun-sde/sun-camera 공통 overlay가 없어 실패했다.
+  실제 Kbuild의 공통 overlay를 포함한 뒤 4조합을 통과했다.
+
+이 검증은 ROM 툴체인/전체 링크/modpost/ABI/boot·vendor_dlkm 패키징 검증이 아니다.
+fdtoverlay 순서도 의존성 검사용이며 ROM의 최종 merge_dtbs/이미지 선택 경로 자체를
+실행한 것은 아니다. 생성된 검증 객체나 DTB는 기기에 플래시하는 배포 산출물이 아니다.
+
+실기 미실행:
+  지문 등록/잠금해제, 화면 켬·AOD·화면 꺼짐에서 반복 터치, 빠른 down/up,
+  충전 PPS/UFCS/일반 USB, 충전 중 온도/절전, Wi-Fi 연결/복구,
+  카메라 촬영/JPEG/영상, 오디오, 진동, 밝기 및 suspend/resume.
+특히 UI-ready 비동기 경합/패널 해제의 런타임 안전성은 컴파일 성공만으로 입증되지 않는다.
+
+8. 재현과 다음 업데이트
+
+작업 루트의 module-update-review에는 inventory/candidates/적용 및 빌드 스크립트,
+원본 Gerrit patchset, diff와 빌드 로그를 남겼다. 임시 생성물은 /tmp/pagani-module-build와
+/tmp/sm8750-modules 아래에 있다. /tmp 내용은 영구 보관을 보장하지 않는다.
+로컬 검증용 sm8750-modules symlink는 새 _los 저장소를, sm8750-devicetrees는
+_devicetrees_los를 가리킨다. 이 이름은 커널의 기존 상대 symlink를 맞추기 위한 것이다.
+ROM에서는 새 모듈 저장소/브랜치가 kernel/oneplus/sm8750-modules에 배치되도록
+manifest/checkout을 구성한다. BoardConfig에 로컬 _los 절대 경로를 넣지 않는다.
+
+기본 검증 재현 (작업 루트에서 실행):
+  make -C android_kernel_oneplus_sm8750 O=/tmp/pagani-module-build ARCH=arm64 LLVM=-18 \
+    gki_defconfig vendor/sun_perf.config vendor/oplus/sun_perf.config
+  make -C android_kernel_oneplus_sm8750 O=/tmp/pagani-module-build ARCH=arm64 LLVM=-18 \
+    KCFLAGS=-mcpu=generic modules_prepare
+  python3 module-update-review/build-display.py
+  python3 module-update-review/dt-check.py
+
+위 /tmp 출력에 이미 기존 config가 있으면 덮어쓰기 전에 해당 작업 출력을 확인한다.
+충전/진동 검증은 같은 make에 아래 옵션과 객체 타깃을 사용했다:
+  KCFLAGS='-mcpu=generic -Wno-error=address-of-packed-member -Wno-error=unused-but-set-variable'
+  PYTHON3=python3 -j8 drivers/power/oplus/v2/oplus_chg_v2.o
+  또는 drivers/misc/vibrator/oplus_haptic/oplus_haptic.o
+외부 객체는 M을 커널 소스 기준 상대 경로로 전달해 산출물이 소스 밖에 생성되게 했다.
+디스플레이 상세 명령/옵션별 결과는 2026-10-07-state.json에 보존했다.
+
+향후 절차:
+  1) 모든 checkout의 SHA/브랜치/dirty 상태, 펌웨어·지역·툴체인을 먼저 기록한다.
+  2) OEM 이전/신규 SHA를 고정하고 경로별 변경·추가·삭제를 비교한다.
+  3) 이 기록의 범위별 반영 수준과 보류 목록을 함께 사용한다.
+     charger/v2의 다음 원본 비교 기준은 이번 OEM SHA다. 다른 모듈은 선택 반영이므로
+     이번 SHA까지 전체 반영됐다고 가정하지 않는다.
+  4) DT compatible → 드라이버 → Kconfig/Makefile → .ko → install/load → HAL
+     순서로 필요성을 확인한다. inline 모듈과 이름 변경도 확인한다.
+  5) OEM 일반 파일과 로컬 차이를 3-way로 검토한다. 충돌이 없다는 것은 동작 검증이 아니다.
+  6) 지문 8개 구성 변경(커널4/사용자공간2/device2)과 CLO/충전 예외를 따로 대조한다.
+  7) 새 파일의 의존성을 포함하고 기존 모드/줄바꿈을 유지한다. 전체 chmod는 하지 않는다.
+  8) 실제 제품 config와 외부 wrapper 옵션으로 컴파일한 뒤 full ROM/패키징/실기를 검증한다.
+  9) OEM 변경과 커스텀 호환 수정은 커밋을 분리하고 source SHA·검증 한계를 기록한다.
+
+이번 결과만으로 지문 문제의 실기 해결 또는 모든 OEM 기능 동작을 확정하지 않는다.
