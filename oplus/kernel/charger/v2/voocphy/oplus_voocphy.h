@@ -24,7 +24,7 @@
 
 #define BIDIRECT_IRQ_EVNET_NUM			12
 #define IRQ_EVNET_NUM_HL7138			16
-#define DEFAULT_CP_IBUS_DEVATION		800
+#define DEFAULT_CP_IBUS_DEVATION		1000
 #define MAX_IGNORE				6
 #define FIRST_FRAME				0xA8
 #define SVOOC_INIT_VBUS_VOL_LOW			5000
@@ -99,7 +99,8 @@ enum {
 	VOOCPHY_BATT_TEMP_COOL,			/* 5 ~ 12 */
 	VOOCPHY_BATT_TEMP_LITTLE_COOL,		/* 12 ~ 16 */
 	VOOCPHY_BATT_TEMP_LITTLE_COOL_HIGH,	/* 16 ~ 20 */
-	VOOCPHY_BATT_TEMP_NORMAL,		/* 20 ~ 35 */
+	VOOCPHY_BATT_TEMP_NORMAL_LOW_PRE,	/* 21 ~ 25 */
+	VOOCPHY_BATT_TEMP_NORMAL,		/* 25 ~ 35 */
 	VOOCPHY_BATT_TEMP_NORMAL_HIGH,		/* 35 ~ 44 */
 	VOOCPHY_BATT_TEMP_WARM,			/* 44 ~ 51 */
 	VOOCPHY_BATT_TEMP_MAX,
@@ -542,7 +543,7 @@ struct batt_sys_curve {
 
 #define BATT_SYS_ROW_MAX        30
 #define BATT_SYS_COL_MAX        7
-#define BATT_SYS_MAX            7
+#define BATT_SYS_MAX            8
 
 #define DUMP_REG_CNT 49
 
@@ -556,6 +557,7 @@ enum {
 	BATT_SYS_CURVE_TEMP_COOL,
 	BATT_SYS_CURVE_TEMP_LITTLE_COOL,
 	BATT_SYS_CURVE_TEMP_LITTLE_COOL_HIGH,
+	BATT_SYS_CURVE_TEMP_NORMAL_LOW_PRE,
 	BATT_SYS_CURVE_TEMP_NORMAL_LOW,
 	BATT_SYS_CURVE_TEMP_NORMAL_HIGH,
 	BATT_SYS_CURVE_TEMP_WARM,
@@ -575,13 +577,13 @@ enum {
 	CHIP_ID_DEFAULT = 0,
 	CHIP_ID_SC8547,
 	CHIP_ID_HL7138,
+	CHIP_ID_NU2112A,
 };
 
 enum oplus_voocphy_ovp_ctrl {
 	MASTER_CP_ID,
 	SLAVE_CP_ID,
 	INVALID_CP_ID,
-	CHIP_ID_NU2112A,
 };
 
 enum oplus_fastchg_copycat_type {
@@ -592,7 +594,7 @@ enum oplus_fastchg_copycat_type {
 	FAST_COPYCAT_OVER_VBAT_CURRENT,
 	FAST_COPYCAT_VOOC20_REPEAT_FASTCHG_ORNOT,
 	FAST_COPYCAT_VOOC20_REPEAT_IS_VBUS_OK,
-	FAST_COPYCAT_SVOOC_IS_VBUS_OK_EXCEED_MAXCNT,
+	FAST_COPYCAT_IS_VBUS_OK_EXCEED_MAXCNT,
 	FAST_COPYCAT_SVOOC_MISS_ASK_CUR_LEVEL,
 	FAST_COPYCAT_VOOC20_NON_EXPECT_CMD,
 	FAST_COPYCAT_TYPE_MAX,
@@ -652,12 +654,14 @@ struct oplus_voocphy_manager {
 	int vooc_little_cool_temp;
 	int vooc_cool_temp;
 	int vooc_little_cold_temp;
+	int vooc_normal_low_pre_temp;
 	int vooc_normal_low_temp;
 	int vooc_normal_high_temp;
 	int vooc_normal_high_temp_default;
 	int vooc_little_cool_temp_default;
 	int vooc_cool_temp_default;
 	int vooc_little_cold_temp_default;
+	int vooc_normal_low_pre_temp_default;
 	int vooc_normal_low_temp_default;
 	int vooc_little_cool_high_temp;
 	int vooc_little_cool_high_temp_default;
@@ -810,6 +814,9 @@ struct oplus_voocphy_manager {
 	struct delayed_work clear_boost_work;
 	struct delayed_work voocphy_send_ongoing_notify;
 	struct delayed_work recovery_system_work;
+	struct delayed_work pcc_work;
+	struct delayed_work voocphy_fcs_work;
+	struct delayed_work set_fcs_icl_work;
 	struct work_struct first_ask_batvol_work;
 	atomic_t  voocphy_freq_state;
 	bool recovery_system_done;
@@ -833,6 +840,7 @@ struct oplus_voocphy_manager {
 	struct batt_sys_curves *batt_sys_curv_by_tmprange;
 	unsigned char cur_sys_curv_idx;
 	int sys_curve_temp_idx;
+	int temp_region_cnt;
 
 	struct vooc_monitor_event mornitor_evt[MONITOR_EVENT_NUM];
 
@@ -898,8 +906,6 @@ struct oplus_voocphy_manager {
 	int	disconn_pre_vbat;
 	int	disconn_pre_ibat;
 	int	disconn_pre_vbat_calc;
-	int	voocphy_enable;
-	int	slave_voocphy_enable;
 	int	vbus_adjust_cnt;
 	unsigned int vbat_calc;
 	int ap_handle_timeout_num;
@@ -946,6 +952,20 @@ struct oplus_voocphy_manager {
 	bool slave_ic_abnormal;
 	struct delayed_work clear_ic_abnormal_status_work;
 	struct oplus_chg_strategy *svooc_pcc_strategy;
+	bool svooc_pcc_strategy_v2;
+
+	bool cancel_primary_switch; /* add for cancel usb switch */
+
+	bool vbus_adjust_new_method;
+	bool vbus_adjust_done;
+	bool perf_en;
+	bool in_vbus_adjust_trans;
+	u8 vbus_adjust_hold_cnt;
+	u8 last_vooc_vbus_status;
+	struct oplus_chg_strategy *ccd_strategy;
+	bool twice_request_current_enable;
+	bool ufcs_enable;
+	int fcs_icl_ma;
 };
 
 struct oplus_voocphy_operations {
@@ -958,6 +978,7 @@ struct oplus_voocphy_operations {
 	void (*update_data)(struct oplus_voocphy_manager *chip);
 	int (*get_chg_enable)(struct oplus_voocphy_manager *chip, u8 *data);
 	int (*set_chg_enable)(struct oplus_voocphy_manager *chip, bool enable);
+	int (*set_perf_enable)(struct oplus_voocphy_manager *chip, bool enable);
 	int (*get_adc_enable)(struct oplus_voocphy_manager *chip, u8 *data);
 	int (*set_adc_enable)(struct oplus_voocphy_manager *chip, bool enable);
 	int (*set_adc_forcedly_enable)(struct oplus_voocphy_manager *chip, int mode);
@@ -981,8 +1002,8 @@ struct oplus_voocphy_operations {
 	int (*get_voocphy_enable)(struct oplus_voocphy_manager *chip, u8 *data);
 	void (*dump_voocphy_reg)(struct oplus_voocphy_manager *chip);
 	int (*get_chip_id)(struct oplus_voocphy_manager *chip);
-	int (*set_chg_pmid2out)(bool enable, int reason);
-	bool (*get_chg_pmid2out)(void);
+	int (*set_chg_pmid2out)(struct oplus_voocphy_manager *chip, bool enable, int reason);
+	bool (*get_chg_pmid2out)(struct oplus_voocphy_manager *chip);
 	int (*reset_voocphy_ovp)(struct oplus_voocphy_manager *chip);
 	bool (*check_cp_int_happened)(struct oplus_voocphy_manager *chip, bool *dump_reg, bool *send_info);
 	void (*dual_chan_buck_set_ucp)(struct oplus_voocphy_manager *chip, int ucp_value);
@@ -990,6 +1011,9 @@ struct oplus_voocphy_operations {
 	int (*get_cp_error_type)(struct oplus_voocphy_manager *chip, int *err_type);
 	bool (*ic_is_abnormal)(struct oplus_voocphy_manager *chip);
 	int (*set_sstimeout_ucp_enable)(struct oplus_voocphy_manager *chip, bool enable);
+	int (*cp_set_vac2v2x_uvp)(struct oplus_voocphy_manager *chip, bool enable);
+	int (*set_usb_dischg_enable)(struct oplus_voocphy_manager *chip, bool enable);
+	int (*set_ufcs_enable)(struct oplus_voocphy_manager *chip, bool enable);
 };
 
 #define VOOCPHY_LOG_BUF_LEN 1024
@@ -1009,6 +1033,7 @@ struct voocphy_log_buf {
 };
 
 bool oplus_voocphy_chip_is_null(void);
+bool oplus_voocphy_slave_chip_is_null(void);
 void oplus_voocphy_slave_init(struct oplus_voocphy_manager *chip);
 void oplus_voocphy_get_chip(struct oplus_voocphy_manager **chip);
 int oplus_register_voocphy(struct oplus_voocphy_manager *chip);
