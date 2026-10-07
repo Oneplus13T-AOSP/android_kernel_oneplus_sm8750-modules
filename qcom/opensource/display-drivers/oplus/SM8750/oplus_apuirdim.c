@@ -93,6 +93,12 @@ void oplus_apuir_setcmd_work_handler(struct work_struct *work_item)
 		return;
 	}
 
+	/* uir cmd are available in power on */
+	if (display->panel->power_mode != SDE_MODE_DPMS_ON) {
+		APUIR_ERR("should not send uir cmd when power mode is %u\n", display->panel->power_mode);
+		return;
+	}
+
 	panel = display->panel;
 	SDE_ATRACE_BEGIN("oplus_apuir_setcmd_work_handler");
 	SDE_ATRACE_BEGIN("oplus_apuir_set_cmd_replace");
@@ -101,6 +107,13 @@ void oplus_apuir_setcmd_work_handler(struct work_struct *work_item)
 
 	/* mutex_lock(&display->display_lock); */
 	mutex_lock(&panel->panel_lock);
+	/* uir cmd are available in power on */
+	if (display->panel->power_mode != SDE_MODE_DPMS_ON) {
+		APUIR_ERR("Should not send uir cmd when power mode is %u\n", display->panel->power_mode);
+		mutex_unlock(&panel->panel_lock);
+		SDE_ATRACE_END("oplus_apuir_setcmd_work_handler");
+		return;
+	}
 	SDE_ATRACE_BEGIN("cmdset");
 	rc = dsi_panel_tx_cmd_set(display->panel, mAPuirType, false);
 	SDE_ATRACE_END("cmdset");
@@ -289,6 +302,12 @@ void oplus_apuir_set_cmd(void *dsi_display, unsigned int ds)
 	m_apuirdim_ds_update = false;
 	if (!display->panel || !display->panel->cur_mode || !display->panel->cur_mode->priv_info) {
 		APUIR_ERR("invalid panel params\n");
+		return;
+	}
+
+	/* uir cmd are available in power on */
+	if (display->panel->power_mode != SDE_MODE_DPMS_ON) {
+		APUIR_ERR("should not send uir cmd when power mode is %u\n", display->panel->power_mode);
 		return;
 	}
 
