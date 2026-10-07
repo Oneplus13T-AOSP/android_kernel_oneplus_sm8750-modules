@@ -512,7 +512,7 @@ static void oplus_retention_chg_wired_subs_callback(struct mms_subscribe *subs,
 			chip->wired_online = !!data.intval;
 			if (!chip->wired_online)
 				schedule_delayed_work(&chip->online_check_work, 0);
-			if (chip->irq_plug_flag == 0)
+			if (chip->irq_plug_flag == 0 && !chip->wired_online)
 				schedule_delayed_work(&chip->present_check_work, 0);
 			break;
 		case WIRED_ITEM_CHG_TYPE:
@@ -892,4 +892,3 @@ static __exit void oplus_retention_charge_exit(void)
 }
 
 oplus_chg_module_register(oplus_retention_charge);
-
