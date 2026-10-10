@@ -4297,6 +4297,7 @@ ssize_t oplus_adfr_set_config_attr(struct kobject *obj,
 	struct kobj_attribute *attr, const char *buf, size_t count)
 {
 	unsigned int config = 0;
+	unsigned int panel_config = 0;
 	struct dsi_display *display = oplus_display_get_current_display();
 	struct oplus_adfr_params *p_oplus_adfr_params = NULL;
 
@@ -4323,6 +4324,15 @@ ssize_t oplus_adfr_set_config_attr(struct kobject *obj,
 	OPLUS_ADFR_TRACE_BEGIN("oplus_adfr_set_adfr_config_attr");
 
 	sscanf(buf, "%x", &config);
+
+	/* Keep AA594 panel command selection when enabling the AOSP LTPO path. */
+	if (OPLUS_ADFR_GET_GLOBAL_CONFIG(config) && display->panel->name &&
+			!strcmp(display->panel->name, "AA594 P 7 A0020 dsc cmd mode panel") &&
+			!display->panel->utils.read_u32(display->panel->utils.data,
+					"oplus,adfr-config", &panel_config)) {
+		config |= panel_config & (OPLUS_ADFR_CONFIG_PWMMINFPS_BYMODE |
+				OPLUS_ADFR_CONFIG_OA_BL_MUTUAL_EXCLUSION);
+	}
 
 	p_oplus_adfr_params->config = config;
 	ADFR_INFO("oplus_adfr_config:0x%x\n", p_oplus_adfr_params->config);
