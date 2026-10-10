@@ -53,3 +53,20 @@ legacy unchecked init call. OFP init keeps optional parsing best effort;
 owned-session construction failure is cleaned up before returning an
 error. The panel error path may repeat partial cleanup after that unbind,
 which is a no-op. Pass the define consistently to all display objects.
+
+HBM readiness synchronization
+-----------------------------
+For an opted-in owner, HBM command state, scan confirmation, READY evaluation
+and pending request claims share state_lock. An HBM state transition clears
+scan readiness and advances an owner-local HBM generation. OFF cancels
+unclaimed READY; a following ON must receive fresh RD_PTR confirmation.
+The AOD path with its command delay removed still waits the panel-declared
+oplus_ofp_hbm_on_period, while the normal/sync-data path retains the first
+RD_PTR confirmation rule. No panel timing or fingerprint mask bit is changed.
+
+Requests carry the HBM generation; the worker validates READY before claiming
+it. TP_DOWN may still resend immediately when the same HBM generation has
+already been confirmed ready. It cannot consume rearm using readiness left
+from an earlier generation. A claimed IN_FLIGHT request remains committed
+and is drained as before; this does not promise cancellation of a notifier
+already being delivered when OFF or TP_UP arrives.
