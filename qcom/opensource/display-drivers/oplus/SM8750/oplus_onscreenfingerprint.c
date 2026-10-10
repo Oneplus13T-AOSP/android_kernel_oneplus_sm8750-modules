@@ -131,6 +131,7 @@ static void ofp_submit_uiready_locked(struct ofp_uiready_owner *owner,
 {
 	struct ofp_uiready_request request = {
 		.request_id = ++owner->next_request_id,
+		.hbm_generation = owner->hbm_generation,
 		.touch_id = value == OPLUS_OFP_UI_READY && rearm && !level_change ?
 			owner->touch_id : 0,
 		.value = value,
@@ -511,6 +512,11 @@ int oplus_ofp_init(void *dsi_panel)
 		}
 		owner->panel = panel;
 		owner->last_calculated = OPLUS_OFP_UI_DISAPPEAR;
+		++owner->hbm_generation;
+		owner->hbm_te_count = 0;
+		p_oplus_ofp_params->hbm_state = false;
+		p_oplus_ofp_params->panel_hbm_status = false;
+		p_oplus_ofp_params->notifier_chain_value = OPLUS_OFP_UI_DISAPPEAR;
 		owner->touch_id = 0;
 		atomic_set(&p_oplus_ofp_params->uiready_rearm_pending, 0);
 		spin_unlock_irqrestore(&owner->state_lock, flags);
@@ -881,9 +887,54 @@ bool oplus_ofp_get_hbm_state(void)
 	return p_oplus_ofp_params->hbm_state;
 }
 
+/* Caller owns state_lock. Preserve rearm until this HBM generation is ready. */
+static void ofp_update_hbm_state_locked(struct ofp_uiready_owner *owner,
+		struct oplus_ofp_params *params, bool hbm_state)
+{
+	if (params->hbm_state == hbm_state)
+		return;
+
+	params->hbm_state = hbm_state;
+	++owner->hbm_generation;
+	owner->hbm_te_count = 0;
+	params->panel_hbm_status = false;
+	ofp_request_cancel(owner, &owner->pending_ready);
+	params->notifier_chain_value = OPLUS_OFP_UI_DISAPPEAR;
+	if (owner->last_calculated != OPLUS_OFP_UI_DISAPPEAR &&
+			owner->lifecycle == OFP_OWNER_ACCEPTING && owner->uiready_wq)
+		ofp_submit_uiready_locked(owner, OPLUS_OFP_UI_DISAPPEAR, true, false);
+	owner->last_calculated = OPLUS_OFP_UI_DISAPPEAR;
+}
+
+/* Called only by the RD_PTR path after the OEM command/post-wait sequence. */
+static void ofp_confirm_hbm_scan_locked(struct ofp_uiready_owner *owner,
+		struct oplus_ofp_params *params, bool need_sync, unsigned int on_period)
+{
+	if (!params->hbm_state) {
+		params->panel_hbm_status = false;
+		owner->hbm_te_count = 0;
+	} else if (params->aod_unlocking && !need_sync) {
+		if (!params->panel_hbm_status && ++owner->hbm_te_count == on_period)
+			params->panel_hbm_status = true;
+	} else {
+		params->panel_hbm_status = true;
+	}
+}
+
+/* Claim is the delivery commit point; a claimed request is drained at stop. */
+static bool ofp_ready_request_valid_locked(struct ofp_uiready_owner *owner,
+		struct oplus_ofp_params *params, struct ofp_uiready_request *request)
+{
+	return request->value != OPLUS_OFP_UI_READY ||
+		(request->hbm_generation == owner->hbm_generation &&
+		 params->hbm_state && params->panel_hbm_status);
+}
+
 static int oplus_ofp_set_hbm_state(bool hbm_state)
 {
 	struct oplus_ofp_params *p_oplus_ofp_params = oplus_ofp_get_params(oplus_ofp_display_id);
+	struct ofp_uiready_owner *owner;
+	unsigned long flags;
 
 	OFP_DEBUG("start\n");
 
@@ -894,7 +945,14 @@ static int oplus_ofp_set_hbm_state(bool hbm_state)
 
 	OPLUS_OFP_TRACE_BEGIN("oplus_ofp_set_hbm_state");
 
-	p_oplus_ofp_params->hbm_state = hbm_state;
+	owner = ofp_owner_for_params(p_oplus_ofp_params);
+	if (owner) {
+		spin_lock_irqsave(&owner->state_lock, flags);
+		ofp_update_hbm_state_locked(owner, p_oplus_ofp_params, hbm_state);
+		spin_unlock_irqrestore(&owner->state_lock, flags);
+	} else {
+		p_oplus_ofp_params->hbm_state = hbm_state;
+	}
 	OFP_INFO("oplus_ofp_hbm_state:%d\n", hbm_state);
 	OPLUS_OFP_TRACE_INT("oplus_ofp_hbm_state", p_oplus_ofp_params->hbm_state);
 
@@ -2670,6 +2728,8 @@ int oplus_ofp_panel_hbm_status_update(void *sde_encoder_phys)
 {
 	static bool last_hbm_state = false;
 	static unsigned int te_count = 0;
+	struct ofp_uiready_owner *owner;
+	unsigned long flags;
 	struct sde_encoder_phys *phys_enc = sde_encoder_phys;
 	struct sde_connector *c_conn = NULL;
 	struct dsi_display *display = NULL;
@@ -2706,6 +2766,21 @@ int oplus_ofp_panel_hbm_status_update(void *sde_encoder_phys)
 	}
 
 	OPLUS_OFP_TRACE_BEGIN("oplus_ofp_panel_hbm_status_update");
+
+	owner = ofp_owner_for_params(p_oplus_ofp_params);
+	if (owner) {
+		spin_lock_irqsave(&owner->state_lock, flags);
+		if (owner->lifecycle == OFP_OWNER_ACCEPTING && owner->panel == display->panel) {
+			ofp_confirm_hbm_scan_locked(owner, p_oplus_ofp_params,
+				display->panel->cur_mode->priv_info->oplus_ofp_need_to_sync_data_in_aod_unlocking,
+				display->panel->cur_mode->priv_info->oplus_ofp_hbm_on_period);
+			OPLUS_OFP_TRACE_INT("oplus_ofp_panel_hbm_status",
+				p_oplus_ofp_params->panel_hbm_status);
+		}
+		spin_unlock_irqrestore(&owner->state_lock, flags);
+		OPLUS_OFP_TRACE_END("oplus_ofp_panel_hbm_status_update");
+		return 0;
+	}
 
 	if (p_oplus_ofp_params->aod_unlocking && oplus_ofp_get_hbm_state()
 			&& !display->panel->cur_mode->priv_info->oplus_ofp_need_to_sync_data_in_aod_unlocking) {
@@ -2981,6 +3056,13 @@ static void ofp_owned_uiready_work_handler(struct work_struct *work_item)
 			spin_unlock_irqrestore(&owner->state_lock, flags);
 			return;
 		}
+		/* Reject unclaimed READY from an invalidated HBM generation. */
+		if (!ofp_ready_request_valid_locked(owner,
+				&g_oplus_ofp_params[ofp_owner_id(owner)], pending)) {
+			ofp_request_cancel(owner, pending);
+			spin_unlock_irqrestore(&owner->state_lock, flags);
+			continue;
+		}
 		/* These are invariants, not a new readiness predicate. */
 		WARN_ON_ONCE(!owner->panel || owner->in_flight.state != OFP_REQUEST_EMPTY);
 		/* STOPPING cancels pending slots; an existing claim is never rolled back. */
@@ -3105,10 +3187,10 @@ static void ofp_evaluate_uiready_locked(struct ofp_uiready_owner *owner,
 	last_notifier_chain_value = owner->last_calculated;
 
 	if (oplus_ofp_local_hbm_is_enabled() && oplus_ofp_local_hbm_unlocking_acceleration_is_enabled()) {
-		if (p_oplus_ofp_params->panel_hbm_status) {
+		if (p_oplus_ofp_params->hbm_state && p_oplus_ofp_params->panel_hbm_status) {
 			/* ddic pressed icon scanning has started */
 			p_oplus_ofp_params->notifier_chain_value = OPLUS_OFP_UI_READY;
-		} else if (!p_oplus_ofp_params->panel_hbm_status) {
+		} else {
 			/* the data scanning without pressed icon has started */
 			p_oplus_ofp_params->notifier_chain_value = OPLUS_OFP_UI_DISAPPEAR;
 		}

@@ -109,6 +109,7 @@ enum ofp_uiready_reason {
 
 struct ofp_uiready_request {
 	u64 request_id;
+	u64 hbm_generation;
 	u64 touch_id; /* zero means panel-level, never cancelled by TP_UP */
 	unsigned int value;
 	unsigned int reason;
@@ -132,6 +133,9 @@ struct ofp_uiready_owner {
 	u64 touch_id;
 	u64 transition_seq;
 	unsigned int last_calculated;
+	/* HBM command transitions and IRQ confirmation share state_lock. */
+	u64 hbm_generation;
+	unsigned int hbm_te_count;
 };
 
 enum oplus_ofp_property_value {
