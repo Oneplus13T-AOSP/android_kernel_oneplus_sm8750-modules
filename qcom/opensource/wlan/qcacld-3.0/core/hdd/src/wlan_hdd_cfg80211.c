@@ -21179,11 +21179,8 @@ hdd_send_usable_channel(struct hdd_context *hdd_ctx,
 	uint32_t skb_len;
 	int status;
 
+	/* An empty result is valid when no channels match the request. */
 	skb_len = hdd_get_usable_channel_len(count);
-	if (!skb_len) {
-		hdd_err("No data requested");
-		return -EINVAL;
-	}
 
 	/**
 	 * As each nesting occupies NLMSG_HDRLEN size in the skb, add
